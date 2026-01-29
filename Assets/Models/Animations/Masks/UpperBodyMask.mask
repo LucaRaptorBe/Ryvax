@@ -1,0 +1,53 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!319 &31900000
+AvatarMask:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: UpperBodyMask
+  m_Mask: 00000000010000000100000000000000000000000100000001000000010000000100000000000000000000000100000001000000
+  m_Elements:
+  - m_Path: 
+    m_Weight: 1
+  - m_Path: Root
+    m_Weight: 1
+  - m_Path: Root/Hips
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/Neck
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/Neck/Head
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/LeftShoulder
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/LeftShoulder/LeftUpperArm
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/LeftShoulder/LeftUpperArm/LeftLowerArm
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/LeftShoulder/LeftUpperArm/LeftLowerArm/LeftHand
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/RightShoulder
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/RightShoulder/RightUpperArm
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/RightShoulder/RightUpperArm/RightLowerArm
+    m_Weight: 1
+  - m_Path: Root/Hips/Spine/Chest/RightShoulder/RightUpperArm/RightLowerArm/RightHand
+    m_Weight: 1
+  - m_Path: Root/Hips/LeftUpperLeg
+    m_Weight: 0
+  - m_Path: Root/Hips/LeftUpperLeg/LeftLowerLeg
+    m_Weight: 0
+  - m_Path: Root/Hips/LeftUpperLeg/LeftLowerLeg/LeftFoot
+    m_Weight: 0
+  - m_Path: Root/Hips/RightUpperLeg
+    m_Weight: 0
+  - m_Path: Root/Hips/RightUpperLeg/RightLowerLeg
+    m_Weight: 0
+  - m_Path: Root/Hips/RightUpperLeg/RightLowerLeg/RightFoot
+    m_Weight: 0
