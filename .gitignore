@@ -75,4 +75,4 @@ crashlytics-build.properties
 .plastic/
 
 # Large model files (too big for GitHub)
-Assets/Models/Character/Soul_Eater_Model/Soul_Eater.fbx
+Assets/Character/SoulEater/Soul_Eater.fbx
