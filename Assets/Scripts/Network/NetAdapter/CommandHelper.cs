@@ -77,13 +77,6 @@ namespace MOBANet.NetAdapter
             // Slot is the action itself (CastQ=1, CastW=2, etc.)
             simCmd.Slot = cmd.Action;
 
-            // Special case: Launch command stores velocity in Direction
-            if (cmd.Action == AbilityAction.Launch)
-            {
-                simCmd.Direction = cmd.GetLaunchVelocity();
-                return;
-            }
-
             // Target position from Data0/Data1
             Vector2 pos2D = cmd.GetTargetPosition();
             simCmd.TargetPosition = new Vector3(pos2D.x, 0f, pos2D.y);

@@ -33,6 +33,12 @@ namespace MOBANet.NetAdapter.Messages
         public uint AckInputSeq;
 
         /// <summary>
+        /// Last processed movement sequence for this client.
+        /// Used for movement reconciliation (separate from event command ACKs).
+        /// </summary>
+        public uint AckMovementSeq;
+
+        /// <summary>
         /// Number of entities in this snapshot
         /// </summary>
         public ushort EntityCount;
@@ -43,7 +49,7 @@ namespace MOBANet.NetAdapter.Messages
         /// </summary>
         public EntityState[] Entities;
 
-        // Header size: 4 + 4 + 2 = 10 bytes
+        // Header size: 4 + 4 + 4 + 2 = 14 bytes
         // + EntityCount * sizeof(EntityState)
     }
 
@@ -110,7 +116,24 @@ namespace MOBANet.NetAdapter.Messages
         /// </summary>
         public short VelZ;
 
-        // Total size: 4 + 1 + 1 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 = 21 bytes per entity
+        /// <summary>
+        /// Vertical velocity Y component, quantized (0.01 u/s precision)
+        /// Used for gravity/jump synchronization
+        /// </summary>
+        public short VelY;
+
+        /// <summary>
+        /// Current movement speed, quantized (0.1 u/s precision)
+        /// Used for visual offset thresholds
+        /// </summary>
+        public ushort SpeedQ;
+
+        /// <summary>
+        /// Event flags (CC, blink, teleport, etc.)
+        /// </summary>
+        public byte EventFlags;
+
+        // Total size: 4 + 1 + 1 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 1 = 26 bytes per entity
 
         #region Quantization Constants
 
@@ -154,11 +177,11 @@ namespace MOBANet.NetAdapter.Messages
         public float Rotation => (RotY / QUANT_FACTOR) * 360f;
 
         /// <summary>
-        /// Get dequantized horizontal velocity (Y component is always 0)
+        /// Get dequantized velocity (full 3D including vertical component)
         /// </summary>
         public Vector3 Velocity => new Vector3(
             VelX / VELOCITY_SCALE,
-            0f,
+            VelY / VELOCITY_SCALE,
             VelZ / VELOCITY_SCALE
         );
 
@@ -178,6 +201,36 @@ namespace MOBANet.NetAdapter.Messages
         public bool WasDestroyed => (Flags & (byte)EntityFlags.Destroyed) != 0;
 
         /// <summary>
+        /// Get dequantized movement speed
+        /// </summary>
+        public float Speed => SpeedQ / 10f;
+
+        /// <summary>
+        /// Check if entity is under immobilizing CC
+        /// </summary>
+        public bool HasImmobilizeCC => (EventFlags & (byte)EntityEventFlags.ImmobilizeCC) != 0;
+
+        /// <summary>
+        /// Check if entity just blinked
+        /// </summary>
+        public bool HasBlinkEvent => (EventFlags & (byte)EntityEventFlags.BlinkEvent) != 0;
+
+        /// <summary>
+        /// Check if entity just teleported
+        /// </summary>
+        public bool HasTeleportEvent => (EventFlags & (byte)EntityEventFlags.TeleportEvent) != 0;
+
+        /// <summary>
+        /// Check if entity state was reset
+        /// </summary>
+        public bool HasStateReset => (EventFlags & (byte)EntityEventFlags.StateReset) != 0;
+
+        /// <summary>
+        /// Check if entity is dashing
+        /// </summary>
+        public bool IsDashing => (EventFlags & (byte)EntityEventFlags.Dashing) != 0;
+
+        /// <summary>
         /// Create EntityState from simulation entity
         /// </summary>
         public static EntityState FromSimEntity(
@@ -189,6 +242,25 @@ namespace MOBANet.NetAdapter.Messages
             byte state,
             bool isAlive,
             Vector3 velocity,
+            float mapScale = MAP_SCALE)
+        {
+            return FromSimEntity(entityId, entityType, position, rotationY, health, state, isAlive, velocity, 0f, EntityEventFlags.None, mapScale);
+        }
+
+        /// <summary>
+        /// Create EntityState from simulation entity with speed and event flags
+        /// </summary>
+        public static EntityState FromSimEntity(
+            uint entityId,
+            byte entityType,
+            Vector3 position,
+            float rotationY,
+            int health,
+            byte state,
+            bool isAlive,
+            Vector3 velocity,
+            float speed,
+            EntityEventFlags eventFlags,
             float mapScale = MAP_SCALE)
         {
             byte flags = 0;
@@ -206,7 +278,10 @@ namespace MOBANet.NetAdapter.Messages
                 Health = (ushort)Mathf.Clamp(health, 0, ushort.MaxValue),
                 State = state,
                 VelX = QuantizeVelocity(velocity.x),
-                VelZ = QuantizeVelocity(velocity.z)
+                VelZ = QuantizeVelocity(velocity.z),
+                VelY = QuantizeVelocity(velocity.y),
+                SpeedQ = (ushort)Mathf.Clamp(speed * 10f, 0, ushort.MaxValue),
+                EventFlags = (byte)eventFlags
             };
         }
 
@@ -250,5 +325,26 @@ namespace MOBANet.NetAdapter.Messages
         Owned = 1 << 4,      // Entity is owned by receiving client
         Relevant = 1 << 5,   // Entity is relevant to receiving client
         // 6-7 reserved
+    }
+
+    /// <summary>
+    /// Extended entity flags for CC and events.
+    /// Sent as a separate byte to maintain backwards compatibility.
+    /// </summary>
+    [Flags]
+    public enum EntityEventFlags : byte
+    {
+        None = 0,
+        /// <summary>Entity is under immobilizing CC (root/stun)</summary>
+        ImmobilizeCC = 1 << 0,
+        /// <summary>Entity just blinked (short teleport)</summary>
+        BlinkEvent = 1 << 1,
+        /// <summary>Entity just teleported (long distance)</summary>
+        TeleportEvent = 1 << 2,
+        /// <summary>Entity state was reset (respawn, etc.)</summary>
+        StateReset = 1 << 3,
+        /// <summary>Entity is dashing</summary>
+        Dashing = 1 << 4,
+        // 5-7 reserved
     }
 }

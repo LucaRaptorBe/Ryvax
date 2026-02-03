@@ -19,19 +19,21 @@ namespace MOBANet.NetAdapter
         /// <summary>
         /// Create a snapshot from the simulation world
         /// </summary>
-        public static SnapshotDelta CreateSnapshot(SimWorld world, int forClientId, uint ackInputSeq)
+        public static SnapshotDelta CreateSnapshot(SimWorld world, int forClientId, uint ackInputSeq, uint ackMovementSeq = 0)
         {
             var entities = new System.Collections.Generic.List<NetEntityState>();
 
+            float playerMoveSpeed = world.Config?.PlayerMoveSpeed ?? 8f;
             foreach (var entity in world.AllEntities)
             {
-                entities.Add(EntityStateFromSimEntity(entity));
+                entities.Add(EntityStateFromSimEntity(entity, playerMoveSpeed));
             }
 
             return new SnapshotDelta
             {
                 ServerTick = world.Clock.CurrentTick,
                 AckInputSeq = ackInputSeq,
+                AckMovementSeq = ackMovementSeq,
                 EntityCount = (ushort)entities.Count,
                 Entities = entities.ToArray()
             };
@@ -44,19 +46,23 @@ namespace MOBANet.NetAdapter
         /// <param name="visibleEntities">Set of entity IDs visible to the client</param>
         /// <param name="ackInputSeq">Last acknowledged input sequence</param>
         /// <param name="localEntityId">The client's own entity (always included)</param>
+        /// <param name="ackMovementSeq">Last acknowledged movement sequence</param>
         public static SnapshotDelta CreateFilteredSnapshot(
             SimWorld world,
             System.Collections.Generic.IReadOnlyCollection<uint> visibleEntities,
             uint ackInputSeq,
-            uint localEntityId)
+            uint localEntityId,
+            uint ackMovementSeq = 0)
         {
             var entities = new System.Collections.Generic.List<NetEntityState>();
+
+            float playerMoveSpeed = world.Config?.PlayerMoveSpeed ?? 8f;
 
             // Always include local player's entity
             var localEntity = world.GetEntity(localEntityId);
             if (localEntity != null)
             {
-                entities.Add(EntityStateFromSimEntity(localEntity));
+                entities.Add(EntityStateFromSimEntity(localEntity, playerMoveSpeed));
             }
 
             // Add visible entities (skip if already added as local)
@@ -67,7 +73,7 @@ namespace MOBANet.NetAdapter
                 var entity = world.GetEntity(entityId);
                 if (entity != null)
                 {
-                    entities.Add(EntityStateFromSimEntity(entity));
+                    entities.Add(EntityStateFromSimEntity(entity, playerMoveSpeed));
                 }
             }
 
@@ -75,6 +81,7 @@ namespace MOBANet.NetAdapter
             {
                 ServerTick = world.Clock.CurrentTick,
                 AckInputSeq = ackInputSeq,
+                AckMovementSeq = ackMovementSeq,
                 EntityCount = (ushort)entities.Count,
                 Entities = entities.ToArray()
             };
@@ -107,11 +114,18 @@ namespace MOBANet.NetAdapter
         /// <summary>
         /// Convert SimEntity to network EntityState
         /// </summary>
-        public static NetEntityState EntityStateFromSimEntity(SimEntity entity)
+        public static NetEntityState EntityStateFromSimEntity(SimEntity entity, float playerMoveSpeed = 8f)
         {
             // Component-based states: extract data from specific entity type
             if (entity is SimPlayer player)
             {
+                // Calculate effective move speed
+                float effectiveSpeed = playerMoveSpeed * player.Stats.MoveSpeedModifier;
+
+                // Build event flags from player state
+                var eventFlags = Messages.EntityEventFlags.None;
+                // TODO: Add CC flags, blink/teleport events when implemented
+
                 return NetEntityState.FromSimEntity(
                     entity.Id,
                     (byte)entity.Type,
@@ -120,7 +134,9 @@ namespace MOBANet.NetAdapter
                     player.Stats.Health,
                     (byte)entity.State,
                     player.Stats.IsAlive,
-                    player.Transform.Velocity
+                    player.Transform.Velocity,
+                    effectiveSpeed,
+                    eventFlags
                 );
             }
 

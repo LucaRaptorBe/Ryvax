@@ -23,19 +23,17 @@ namespace MOBANet.GameSim.Commands.Handlers
                 case MovementAction.Change:
                     // Set movement direction - player will move in Tick()
                     player.SetMoveDirection(cmd.Direction);
-                    Debug.Log($"[MovementHandler] Player {player.Id} MoveStart/Change: dir={cmd.Direction}, velocity after={player.Transform.Velocity}");
+                    // Debug.Log($"[MovementHandler] Player {player.Id} MoveStart/Change: dir={cmd.Direction}, velocity after={player.Transform.Velocity}");
                     break;
 
                 case MovementAction.Stop:
                     // Stop moving
                     player.StopMoving();
-                    Debug.Log($"[MovementHandler] Player {player.Id} MoveStop");
+                    // Debug.Log($"[MovementHandler] Player {player.Id} MoveStop");
                     break;
 
                 case MovementAction.Dash:
-                    // TODO: Implement dash ability in new architecture
-                    // Dash is now handled via Launch command (similar to Jump)
-                    // player.ApplyLaunchVelocity(cmd.Direction * dashSpeed);
+                    // TODO: Implement dash ability
                     break;
             }
         }

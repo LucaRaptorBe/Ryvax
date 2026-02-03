@@ -132,6 +132,7 @@ GameObject:
   - component: {fileID: 100000003}
   - component: {fileID: 100000004}
   - component: {fileID: 100000005}
+  - component: {fileID: 100000006}
   m_Layer: 0
   m_Name: NetworkManager
   m_TagString: Untagged
@@ -170,7 +171,7 @@ MonoBehaviour:
   _serverLoop: {fileID: 100000004}
   _networkClient: {fileID: 100000005}
   _defaultPort: 7777
-  _defaultAddress: 127.0.0.1
+  _defaultAddress: 213.32.22.234
   _showDebugUI: 1
 --- !u!114 &100000003
 MonoBehaviour:
@@ -229,12 +230,30 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d683c7b905279464b97b370620632e35, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _netAdapter: {fileID: 0}
-  _serverAddress: 127.0.0.1
+  _netAdapter: {fileID: 100000003}
+  _serverAddress: 213.32.22.234
   _serverPort: 7777
   _autoConnect: 0
-  _playerPrefab: {fileID: 6379753090235682287, guid: ff0cbfdadef6d534086068d4f9e8061f, type: 3}
-  _directInterpolation: 0
+  _inputSendRate: 60
+--- !u!114 &100000006
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 100000000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3fdaae44044276a49a52229c1597e33b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _updateOrder: 0
+  _timingType: 0
+  _allowTickDropping: 1
+  _maximumFrameTicks: 3
+  _tickRate: 60
+  _pingInterval: 1
+  _physicsMode: 0
 --- !u!1 &200000000
 GameObject:
   m_ObjectHideFlags: 0
@@ -457,12 +476,13 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 300000000}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 6176209b24eaa8140af5958d0e448616, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
   target: {fileID: 0}
+  enableFollowTarget: 0
   height: 10
   distance: 8
   angle: 45
@@ -624,7 +644,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   networkMode: 2
-  playerPrefab: {fileID: 6379753090235682287, guid: ff0cbfdadef6d534086068d4f9e8061f, type: 3}
+  playerPrefab: {fileID: 429167651815117660, guid: 324e33a4e05484cdfad3e7d820265653, type: 3}
   spawnPoints: []
   defaultSpawnPosition: {x: 0, y: 1, z: 0}
   team1SpawnPoints: []
@@ -640,15 +660,23 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: 1312352244, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
       propertyPath: m_AnchoredPosition.x
-      value: 155.1001
+      value: 155.10059
       objectReference: {fileID: 0}
     - target: {fileID: 1312352244, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
       propertyPath: m_AnchoredPosition.y
       value: -52.69995
       objectReference: {fileID: 0}
+    - target: {fileID: 390329389210975320, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
+      propertyPath: m_AnchoredPosition.x
+      value: 232.59961
+      objectReference: {fileID: 0}
+    - target: {fileID: 390329389210975320, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
+      propertyPath: m_AnchoredPosition.y
+      value: -121.40001
+      objectReference: {fileID: 0}
     - target: {fileID: 3414662637742749596, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
       propertyPath: m_AnchoredPosition.x
-      value: 78.1001
+      value: 78.100586
       objectReference: {fileID: 0}
     - target: {fileID: 3414662637742749596, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
       propertyPath: m_AnchoredPosition.y
@@ -673,6 +701,10 @@ PrefabInstance:
     - target: {fileID: 7443408887813606051, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
       propertyPath: m_Name
       value: FishNet NetworkManager
+      objectReference: {fileID: 0}
+    - target: {fileID: 7443408887813606060, guid: 0b650fca685f2eb41a86538aa883e4c1, type: 3}
+      propertyPath: m_Enabled
+      value: 0
       objectReference: {fileID: 0}
     m_RemovedComponents: []
     m_RemovedGameObjects:
@@ -805,6 +837,37 @@ PrefabInstance:
     m_AddedGameObjects: []
     m_AddedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 2a762649ed446a145b350723f0030e69, type: 3}
+--- !u!1 &1344649988
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1344649989}
+  m_Layer: 0
+  m_Name: Archer_Prefab
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1344649989
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1344649988}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1001 &1693928220
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -875,3 +938,4 @@ SceneRoots:
   - {fileID: 452357985}
   - {fileID: 1232852353}
   - {fileID: 1297667080}
+  - {fileID: 1344649989}

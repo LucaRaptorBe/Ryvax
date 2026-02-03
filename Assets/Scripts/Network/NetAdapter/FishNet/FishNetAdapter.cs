@@ -9,6 +9,7 @@ using FishNet.Broadcast;
 using FishNet.Connection;
 using FishNet.Managing;
 using FishNet.Transporting;
+using FishNet.Serializing;
 using UnityEngine;
 using MOBANet.Core;
 using MOBANet.NetAdapter.Messages;
@@ -68,6 +69,30 @@ namespace MOBANet.NetAdapter.FishNet
         public event Action OnClientStarted;
         public event Action OnDisconnected;
 
+        /// <summary>
+        /// Called when MoveDir intent received (WASD movement).
+        /// Parameters: clientId, movementSeq, direction (normalized XZ as Vector2), recvSocketTicks (monotonic timestamp)
+        /// </summary>
+        public event Action<int, uint, Vector2, long> OnMoveDirReceived;
+
+        /// <summary>
+        /// Called when MoveTo intent received (click movement).
+        /// Parameters: clientId, movementSeq, targetPosition (world XZ as Vector2), recvSocketTicks (monotonic timestamp)
+        /// </summary>
+        public event Action<int, uint, Vector2, long> OnMoveToReceived;
+
+        /// <summary>
+        /// Called when Stop intent received.
+        /// Parameters: clientId, movementSeq, recvSocketTicks (monotonic timestamp)
+        /// </summary>
+        public event Action<int, uint, long> OnStopReceived;
+
+        /// <summary>
+        /// Called when Follow intent received.
+        /// Parameters: clientId, movementSeq, targetEntityId, recvSocketTicks (monotonic timestamp)
+        /// </summary>
+        public event Action<int, uint, uint, long> OnFollowReceived;
+
         #endregion
 
         #region Unity Lifecycle
@@ -111,6 +136,7 @@ namespace MOBANet.NetAdapter.FishNet
 
             // Register broadcast handlers
             _networkManager.ServerManager.RegisterBroadcast<GameCommandBroadcast>(HandleServerReceiveCommand);
+            _networkManager.ServerManager.RegisterBroadcast<InputPacketBroadcast>(HandleServerReceiveInputPacket);
             _networkManager.ClientManager.RegisterBroadcast<SnapshotBroadcast>(HandleClientReceiveSnapshot);
             _networkManager.ClientManager.RegisterBroadcast<ReliableEventBroadcast>(HandleClientReceiveEvent);
             _networkManager.ClientManager.RegisterBroadcast<MatchConfigBroadcast>(HandleClientReceiveMatchConfig);
@@ -127,6 +153,7 @@ namespace MOBANet.NetAdapter.FishNet
             _networkManager.ServerManager.OnRemoteConnectionState -= HandleRemoteConnectionState;
 
             _networkManager.ServerManager.UnregisterBroadcast<GameCommandBroadcast>(HandleServerReceiveCommand);
+            _networkManager.ServerManager.UnregisterBroadcast<InputPacketBroadcast>(HandleServerReceiveInputPacket);
             _networkManager.ClientManager.UnregisterBroadcast<SnapshotBroadcast>(HandleClientReceiveSnapshot);
             _networkManager.ClientManager.UnregisterBroadcast<ReliableEventBroadcast>(HandleClientReceiveEvent);
         }
@@ -202,6 +229,41 @@ namespace MOBANet.NetAdapter.FishNet
                 var broadcast = new GameCommandBroadcast { Command = gameCmd };
                 _networkManager.ClientManager.Broadcast(broadcast, channel);
             }
+        }
+
+        /// <summary>
+        /// Send InputPacket to server via UDP unreliable.
+        /// This is the preferred method for sending inputs to avoid TCP head-of-line blocking.
+        /// </summary>
+        public void SendInputPacket(InputPacket packet)
+        {
+            if (!_networkManager.IsClientStarted) return;
+
+            // LOG A: Enqueue moment (before flush)
+            long enqueueTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+            // if (packet.MovementSeq > 0)
+            // {
+            //     Debug.Log($"[{UnityEngine.Time.time:F3}] [SEND ENQUEUE] C→S seq={packet.MovementSeq} intent={packet.IntentType} ticks={enqueueTicks}");
+            // }
+
+            var broadcast = new InputPacketBroadcast { Packet = packet };
+
+            // DEBUG: Log BEFORE Broadcast call
+            // if (packet.MovementSeq > 0)
+            // {
+            //     Debug.Log($"[{UnityEngine.Time.time:F3}] [BEFORE BROADCAST] seq={packet.MovementSeq} frame={UnityEngine.Time.frameCount}");
+            // }
+
+            // ALWAYS use Unreliable (UDP) for inputs to avoid head-of-line blocking
+            _networkManager.ClientManager.Broadcast(broadcast, Channel.Unreliable);
+
+            // DEBUG: Log AFTER Broadcast call
+            // if (packet.MovementSeq > 0)
+            // {
+            //     Debug.Log($"[{UnityEngine.Time.time:F3}] [AFTER BROADCAST] seq={packet.MovementSeq} frame={UnityEngine.Time.frameCount}");
+            // }
+
+            // Note: Actual socket send happens later during IterateOutgoing (called by TimeManager)
         }
 
         public void SendToClient<T>(int clientId, T message, bool reliable) where T : struct, INetMessage
@@ -344,11 +406,13 @@ namespace MOBANet.NetAdapter.FishNet
             {
                 case RemoteConnectionState.Started:
                     Debug.Log($"[FishNetAdapter] Remote client {conn.ClientId} connected");
+                    _lastProcessedSeq[conn.ClientId] = 0; // Initialize sequence tracking
                     OnClientConnected?.Invoke(conn.ClientId);
                     break;
 
                 case RemoteConnectionState.Stopped:
                     Debug.Log($"[FishNetAdapter] Remote client {conn.ClientId} disconnected");
+                    _lastProcessedSeq.Remove(conn.ClientId); // Cleanup sequence tracking
                     OnClientDisconnected?.Invoke(conn.ClientId);
                     break;
             }
@@ -359,6 +423,104 @@ namespace MOBANet.NetAdapter.FishNet
             if (_handlers.TryGetValue(typeof(GameCommand), out var handler))
             {
                 ((Action<int, GameCommand>)handler)(conn.ClientId, broadcast.Command);
+            }
+        }
+
+        /// <summary>
+        /// Track last processed sequence per client to skip duplicates from UDP redundancy.
+        /// </summary>
+        private readonly Dictionary<int, uint> _lastProcessedSeq = new();
+
+        /// <summary>
+        /// Handle InputPacket from client.
+        /// V4: Decodes by IntentType and invokes type-specific events.
+        /// Discrete events (jump, spell) are processed as commands with dedup.
+        /// </summary>
+        private void HandleServerReceiveInputPacket(NetworkConnection conn, InputPacketBroadcast broadcast, Channel channel)
+        {
+            var packet = broadcast.Packet;
+            int clientId = conn.ClientId;
+
+            // METRIC A: Capture monotonic timestamp at socket receive (earliest possible point)
+            long recvSocketTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            // Version check: reject old packets
+            if (packet.Version < InputPacket.MSG_VERSION)
+            {
+                Debug.LogWarning($"[FishNetAdapter] Rejected InputPacket v{packet.Version} from client {clientId} (expected v{InputPacket.MSG_VERSION})");
+                return;
+            }
+
+            // LOG: Track exact moment FishNet delivers packet to handler
+            // if (packet.MovementSeq > 0)
+            // {
+            //     Debug.Log($"[{UnityEngine.Time.time:F3}] [TRANSPORT RECV] C→S seq={packet.MovementSeq} intent={packet.IntentType} socketTicks={recvSocketTicks}");
+            // }
+
+            // Dispatch by IntentType with correct payload interpretation + monotonic timestamp
+            switch (packet.IntentType)
+            {
+                case PacketIntentType.MoveDir:
+                    OnMoveDirReceived?.Invoke(clientId, packet.MovementSeq, packet.GetDirection(), recvSocketTicks);
+                    break;
+
+                case PacketIntentType.MoveTo:
+                    OnMoveToReceived?.Invoke(clientId, packet.MovementSeq, packet.GetTargetPosition(), recvSocketTicks);
+                    break;
+
+                case PacketIntentType.Stop:
+                    OnStopReceived?.Invoke(clientId, packet.MovementSeq, recvSocketTicks);
+                    break;
+
+                case PacketIntentType.Follow:
+                    OnFollowReceived?.Invoke(clientId, packet.MovementSeq, packet.GetFollowTargetId(), recvSocketTicks);
+                    break;
+
+                case PacketIntentType.None:
+                    // No movement intent - only event commands
+                    break;
+            }
+
+            // Get last processed sequence for this client (for discrete events only)
+            if (!_lastProcessedSeq.TryGetValue(clientId, out uint lastSeq))
+            {
+                lastSeq = 0;
+                _lastProcessedSeq[clientId] = 0;
+            }
+
+            // Process discrete event commands (jump, spell, attack) in sequence order
+            if (packet.Commands == null || packet.Commands.Length == 0) return;
+
+            int processedCount = 0;
+            for (int i = 0; i < packet.Commands.Length; i++)
+            {
+                var cmd = packet.Commands[i];
+
+                // Skip if already processed (due to UDP redundancy)
+                if (cmd.Sequence <= lastSeq)
+                {
+                    continue;
+                }
+
+                // Process this command (only discrete events now)
+                if (_handlers.TryGetValue(typeof(GameCommand), out var handler))
+                {
+                    ((Action<int, GameCommand>)handler)(clientId, cmd);
+                }
+
+                // Update last processed sequence
+                if (cmd.Sequence > _lastProcessedSeq[clientId])
+                {
+                    _lastProcessedSeq[clientId] = cmd.Sequence;
+                }
+                processedCount++;
+            }
+
+            if (processedCount > 0)
+            {
+                DebugLogger.LogThrottled(DebugLogger.Category.Network,
+                    $"InputPacket from client {clientId}: processed {processedCount}/{packet.CommandCount} events, lastSeq={_lastProcessedSeq[clientId]}",
+                    frameInterval: 60);
             }
         }
 
@@ -394,6 +556,76 @@ namespace MOBANet.NetAdapter.FishNet
         {
             Debug.Log($"[FishNetAdapter] Client received MatchConfig: Team1Spawns={broadcast.Team1Spawns?.Length ?? 0}, Team2Spawns={broadcast.Team2Spawns?.Length ?? 0}");
             OnMatchConfigReceived?.Invoke(broadcast.Team1Spawns, broadcast.Team2Spawns);
+        }
+
+        #endregion
+
+        #region Manual Network Polling
+
+        /// <summary>
+        /// Force immediate polling of incoming network data.
+        /// Call this at the START of FixedUpdate to ensure network data is available
+        /// before simulation ticks, avoiding the Update/FixedUpdate phase mismatch.
+        /// </summary>
+        public void ForceIterateIncoming()
+        {
+            if (_networkManager == null) return;
+
+            // Poll server incoming (from clients)
+            if (_networkManager.IsServerStarted)
+            {
+                _networkManager.TransportManager.Transport.IterateIncoming(asServer: true);
+            }
+
+            // Poll client incoming (from server) - for Host mode
+            if (_networkManager.IsClientStarted)
+            {
+                _networkManager.TransportManager.Transport.IterateIncoming(asServer: false);
+            }
+        }
+
+        /// <summary>
+        /// Force immediate flush of outgoing network data.
+        /// Call this in Update to flush packets at frame rate instead of tick rate,
+        /// eliminating the 30Hz tick gating delay (33ms → ~0ms).
+        /// </summary>
+        public void ForceIterateOutgoing()
+        {
+            // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Called frame={UnityEngine.Time.frameCount}");
+
+            if (_networkManager == null)
+            {
+                // Debug.LogWarning($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] NetworkManager is NULL");
+                return;
+            }
+
+            // Flush server outgoing (to clients)
+            if (_networkManager.IsServerStarted)
+            {
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Server - STEP 1: TransportManager.IterateOutgoing");
+                // STEP 1: Flush PacketBundle → Transport
+                _networkManager.TransportManager.IterateOutgoing(asServer: true);
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Server - STEP 2: Transport.IterateOutgoing");
+                // STEP 2: Flush Transport → Socket
+                _networkManager.TransportManager.Transport.IterateOutgoing(asServer: true);
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Server - COMPLETE");
+            }
+
+            // Flush client outgoing (to server)
+            if (_networkManager.IsClientStarted)
+            {
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Client - STEP 1: TransportManager.IterateOutgoing");
+                // STEP 1: Flush PacketBundle → Transport
+                _networkManager.TransportManager.IterateOutgoing(asServer: false);
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Client - STEP 2: Transport.IterateOutgoing");
+                // STEP 2: Flush Transport → Socket
+                _networkManager.TransportManager.Transport.IterateOutgoing(asServer: false);
+                // Debug.Log($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Client - COMPLETE");
+            }
+            else
+            {
+                // Debug.LogWarning($"[{UnityEngine.Time.time:F3}] [FORCE OUTGOING] Client NOT started");
+            }
         }
 
         #endregion
@@ -461,6 +693,14 @@ namespace MOBANet.NetAdapter.FishNet
     public struct GameCommandBroadcast : IBroadcast
     {
         public GameCommand Command;
+    }
+
+    /// <summary>
+    /// FishNet broadcast wrapper for InputPacket (UDP with redundancy)
+    /// </summary>
+    public struct InputPacketBroadcast : IBroadcast
+    {
+        public InputPacket Packet;
     }
 
     #endregion

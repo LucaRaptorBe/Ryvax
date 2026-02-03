@@ -72,6 +72,11 @@ namespace MOBANet.GameSim.Entities
         /// </summary>
         public float TimeSinceLastMoveCmd { get; set; }
 
+        /// <summary>
+        /// Time of last MoveStop command (for debug logging on server)
+        /// </summary>
+        public float LastMoveStopTime { get; set; }
+
         #endregion
 
         #region Constructors
@@ -103,12 +108,10 @@ namespace MOBANet.GameSim.Entities
             {
                 Position = Vector3.zero,
                 RotationY = 0f,
-                Velocity = Vector3.zero, // Includes vertical component (y)
+                Velocity = Vector3.zero,
                 IsGrounded = true,
                 IsMoving = false,
-                MoveDirection = Vector3.zero,
-                IsLaunched = false,
-                LaunchVelocity = Vector3.zero
+                MoveDirection = Vector3.zero
             };
 
             // Initialize StatsState
@@ -116,12 +119,8 @@ namespace MOBANet.GameSim.Entities
             {
                 Health = 100,
                 MaxHealth = 100,
-                Mana = 100,
-                MaxMana = 100,
                 Level = 1,
                 Experience = 0,
-                Armor = 30f,
-                MagicResist = 30f,
                 MoveSpeedModifier = 1.0f
             };
 
@@ -205,34 +204,7 @@ namespace MOBANet.GameSim.Entities
 
         private void ApplyGravity(float dt, SimConfig config)
         {
-            if (Transform.IsLaunched)
-            {
-                // Launched state (dash, knockup, etc.)
-                // Update vertical velocity with gravity
-                var vel = Transform.Velocity;
-                vel.y += config.Gravity * dt;
-                Transform.Velocity = vel;
-
-                Vector3 movement = new Vector3(
-                    Transform.LaunchVelocity.x * dt,
-                    Transform.Velocity.y * dt,
-                    Transform.LaunchVelocity.z * dt
-                );
-                Transform.Position += movement;
-
-                // Check landing
-                if (Transform.Position.y <= 0f && Transform.Velocity.y <= 0f)
-                {
-                    Transform.Position = new Vector3(Transform.Position.x, 0f, Transform.Position.z);
-                    vel = Transform.Velocity;
-                    vel.y = 0f;
-                    Transform.Velocity = vel;
-                    Transform.IsGrounded = true;
-                    Transform.IsLaunched = false;
-                    Transform.LaunchVelocity = Vector3.zero;
-                }
-            }
-            else if (Transform.IsGrounded)
+            if (Transform.IsGrounded)
             {
                 // Grounded movement - apply pull down force
                 var vel = Transform.Velocity;
@@ -353,12 +325,32 @@ namespace MOBANet.GameSim.Entities
         #region Commands (called by CommandHandlers)
 
         /// <summary>
-        /// Start moving in direction.
+        /// Start moving in direction (WASD/MoveDir).
         /// </summary>
         public void SetMoveDirection(Vector3 direction)
         {
             Transform.MoveDirection = direction.sqrMagnitude > 0.01f ? direction.normalized : Vector3.zero;
             Transform.IsMoving = Transform.MoveDirection.sqrMagnitude > 0.01f;
+        }
+
+        /// <summary>
+        /// Move towards target position (click/MoveTo).
+        /// Computes direction internally - keeps semantic separation for future pathfinding.
+        /// </summary>
+        public void SetMoveTarget(Vector3 target)
+        {
+            Vector3 toTarget = target - Transform.Position;
+            toTarget.y = 0; // XZ plane only
+
+            if (toTarget.sqrMagnitude > 0.01f)
+            {
+                SetMoveDirection(toTarget.normalized);
+            }
+            else
+            {
+                // Already at target
+                StopMoving();
+            }
         }
 
         /// <summary>
@@ -376,19 +368,6 @@ namespace MOBANet.GameSim.Entities
             Transform.Velocity = vel;
 
             Transform.IsMoving = false;
-        }
-
-        /// <summary>
-        /// Apply launch velocity (dash, jump, knockup).
-        /// </summary>
-        public void ApplyLaunchVelocity(Vector3 velocity)
-        {
-            Transform.LaunchVelocity = new Vector3(velocity.x, 0f, velocity.z);
-            var vel = Transform.Velocity;
-            vel.y = velocity.y;
-            Transform.Velocity = vel;
-            Transform.IsLaunched = true;
-            Transform.IsGrounded = false;
         }
 
         /// <summary>

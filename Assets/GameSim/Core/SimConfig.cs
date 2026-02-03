@@ -83,7 +83,7 @@ namespace MOBANet.GameSim.Core
         /// <summary>
         /// Default projectile lifetime in seconds
         /// </summary>
-        public float ProjectileLifetime { get; set; } = 3f;
+        public float ProjectileLifetime { get; set; } = 5f;
 
         /// <summary>
         /// Projectile collision radius

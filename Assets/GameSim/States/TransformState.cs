@@ -65,16 +65,6 @@ namespace MOBANet.GameSim.States
 
         #region Launch State (Dash, Knockup)
 
-        /// <summary>
-        /// Is entity in launched state (dash, knockup, etc.)?
-        /// </summary>
-        public bool IsLaunched;
-
-        /// <summary>
-        /// Launch velocity (horizontal component)
-        /// </summary>
-        public Vector3 LaunchVelocity;
-
         #endregion
     }
 }

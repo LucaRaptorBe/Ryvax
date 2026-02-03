@@ -76,4 +76,13 @@ namespace MOBANet.Shared
         public const byte Target = 3;
         public const byte Move = 4;  // Attack-move
     }
+
+    /// <summary>
+    /// Ping actions (METRIC B: RTT measurement)
+    /// </summary>
+    public static class PingAction
+    {
+        public const byte Request = 1;   // Client → Server ping request
+        public const byte Response = 2;  // Server → Client pong response (via ReliableEvent)
+    }
 }

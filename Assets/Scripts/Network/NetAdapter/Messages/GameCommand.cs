@@ -373,18 +373,6 @@ namespace MOBANet.NetAdapter.Messages
         /// </summary>
         public byte GetSlot() => (byte)Data0;
 
-        /// <summary>
-        /// Get launch velocity from Data0/Data1/Data2 (for Launch command)
-        /// </summary>
-        public Vector3 GetLaunchVelocity()
-        {
-            return new Vector3(
-                DequantizePosition(Data0),
-                DequantizePosition((short)(Data2 & 0xFFFF)),
-                DequantizePosition(Data1)
-            );
-        }
-
         #endregion
 
         public override string ToString()

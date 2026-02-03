@@ -971,5 +971,5 @@ AssetOrigin:
   productId: 335880
   packageName: Human Archer Animations FREE
   packageVersion: 1.0
-  assetPath: Assets/Models/Animations/HumanM@Run01_Forward.fbx
+  assetPath: Assets/Character/HumanM/Animations/HumanM@Run01_Forward.fbx
   uploadId: 825246

@@ -76,3 +76,8 @@ crashlytics-build.properties
 
 # Large model files (too big for GitHub)
 Assets/Character/SoulEater/Soul_Eater.fbx
+
+# Server deployment files
+*.tar.gz
+build_server.log
+Scripts/*.log
