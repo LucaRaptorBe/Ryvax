@@ -399,9 +399,43 @@ namespace FishNet.Transporting.Tugboat.Server
                         dm = DeliveryMethod.ReliableOrdered;
                     }
 
+                    // METRIC: Log actual socket send timing with message identification
+                    long socketSendTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+                    // Extract delivery method
+                    string deliveryStr = dm == DeliveryMethod.ReliableOrdered ? "Reliable" : "Unreliable";
+
+                    // Preview first bytes for correlation (hex)
+                    string preview = "";
+                    int previewLen = System.Math.Min(16, segment.Count);
+                    for (int b = 0; b < previewLen; b++)
+                    {
+                        preview += segment.Array[segment.Offset + b].ToString("X2");
+                    }
+
+                    // Attempt to decode snapshot tick or event info
+                    string msgInfo = "";
+                    if (segment.Count >= 8)
+                    {
+                        try
+                        {
+                            int offset = segment.Offset + 2; // Skip FishNet header
+                            if (offset + 4 <= segment.Array.Length)
+                            {
+                                uint tick = System.BitConverter.ToUInt32(segment.Array, offset);
+                                if (tick > 0 && tick < 100000) // Sanity check for tick
+                                {
+                                    msgInfo = $" tick={tick}";
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
                     //Send to all clients.
                     if (connectionId == NetworkConnection.UNSET_CLIENTID_VALUE)
                     {
+                        // UnityEngine.Debug.Log($"[SERVER SOCKET SEND] S→ALL ticks={socketSendTicks} {deliveryStr} size={segment.Count}{msgInfo} preview={preview}");
                         NetManager.SendToAll(segment.Array, segment.Offset, segment.Count, dm);
                     }
                     //Send to one client.
@@ -410,7 +444,10 @@ namespace FishNet.Transporting.Tugboat.Server
                         NetPeer peer = GetNetPeer(connectionId, true);
                         //If peer is found.
                         if (peer != null)
+                        {
+                            // UnityEngine.Debug.Log($"[SERVER SOCKET SEND] S→C{connectionId} ticks={socketSendTicks} {deliveryStr} size={segment.Count}{msgInfo} preview={preview}");
                             peer.Send(segment.Array, segment.Offset, segment.Count, dm);
+                        }
                     }
 
                     outgoing.Dispose();

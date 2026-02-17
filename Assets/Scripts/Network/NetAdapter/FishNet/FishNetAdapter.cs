@@ -499,6 +499,7 @@ namespace MOBANet.NetAdapter.FishNet
                 // Skip if already processed (due to UDP redundancy)
                 if (cmd.Sequence <= lastSeq)
                 {
+                    // Debug.Log($"[FishNetAdapter] DEDUP SKIP: client={clientId}, cmd.Seq={cmd.Sequence} <= lastSeq={lastSeq}, Cat={cmd.Category}, Action={cmd.Action}");
                     continue;
                 }
 

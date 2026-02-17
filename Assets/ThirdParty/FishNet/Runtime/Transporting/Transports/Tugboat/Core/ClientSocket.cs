@@ -181,12 +181,16 @@ namespace FishNet.Transporting.Tugboat.Client
         /// </summary>
         private void DequeueOutgoing()
         {
+            int queueCount = _outgoing.Count;
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [CLIENT DEQUEUE] Entered - queue count={queueCount} frame={UnityEngine.Time.frameCount}");
+
             NetPeer peer = null;
             if (NetManager != null)
                 peer = NetManager.FirstPeer;
             // Server connection hasn't been made.
             if (peer == null)
             {
+                // UnityEngine.Debug.LogWarning($"[{UnityEngine.Time.time:F3}] [CLIENT DEQUEUE] No peer - clearing {queueCount} packets");
                 /* Only dequeue outgoing because other queues might have
                  * relevant information, such as the local connection queue. */
                 ClearPacketQueue(ref _outgoing);
@@ -194,6 +198,7 @@ namespace FishNet.Transporting.Tugboat.Client
             else
             {
                 int count = _outgoing.Count;
+                // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [CLIENT DEQUEUE] Flushing {count} packets to peer");
                 for (int i = 0; i < count; i++)
                 {
                     Packet outgoing = _outgoing.Dequeue();
@@ -207,6 +212,44 @@ namespace FishNet.Transporting.Tugboat.Client
                         Transport.NetworkManager.LogWarning($"Client is sending of {segment.Count} length on the unreliable channel, while the MTU is only {_mtu}. The channel has been changed to reliable for this send.");
                         dm = DeliveryMethod.ReliableOrdered;
                     }
+
+                    // METRIC: Log actual socket send timing with message identification
+                    long socketSendTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
+                    // Extract delivery method
+                    string deliveryStr = dm == DeliveryMethod.ReliableOrdered ? "Reliable" : "Unreliable";
+
+                    // Preview first bytes for correlation (hex)
+                    string preview = "";
+                    int previewLen = System.Math.Min(16, segment.Count);
+                    for (int b = 0; b < previewLen; b++)
+                    {
+                        preview += segment.Array[segment.Offset + b].ToString("X2");
+                    }
+
+                    // Attempt to decode sequence from InputPacket (if this is an input packet)
+                    string seqInfo = "";
+                    if (segment.Count >= 12) // InputPacket has header + sequence
+                    {
+                        // Try to read movement sequence (uint at specific offset after header)
+                        // FishNet header is typically 2 bytes, then our data starts
+                        try
+                        {
+                            int offset = segment.Offset + 2; // Skip FishNet header
+                            if (offset + 8 <= segment.Array.Length)
+                            {
+                                uint clientTick = System.BitConverter.ToUInt32(segment.Array, offset);
+                                uint movementSeq = System.BitConverter.ToUInt32(segment.Array, offset + 4);
+                                if (movementSeq > 0 && movementSeq < 10000) // Sanity check
+                                {
+                                    seqInfo = $" seq={movementSeq}";
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // UnityEngine.Debug.Log($"[SOCKET SEND] C→S ticks={socketSendTicks} {deliveryStr} size={segment.Count}{seqInfo} preview={preview}");
 
                     peer.Send(segment.Array, segment.Offset, segment.Count, dm);
 
@@ -265,6 +308,16 @@ namespace FishNet.Transporting.Tugboat.Client
             // Not started, cannot send.
             if (GetConnectionState() != LocalConnectionState.Started)
                 return;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            // METRIC: Log segment signature to trace packets through transport layers
+            ulong signature = 0;
+            if (segment.Count >= 8)
+            {
+                signature = System.BitConverter.ToUInt64(segment.Array, segment.Offset);
+            }
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [POINT 3 TUGBOAT] frame={UnityEngine.Time.frameCount} size={segment.Count} sig={signature:X16}");
+#endif
 
             Send(ref _outgoing, channelId, segment, -1, _mtu);
         }

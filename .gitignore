@@ -81,3 +81,15 @@ Assets/Character/SoulEater/Soul_Eater.fbx
 *.tar.gz
 build_server.log
 Scripts/*.log
+
+# macOS
+.DS_Store
+
+# Crash dumps
+mono_crash.*.json
+
+# Local data
+db.json
+
+# Claude Code
+.claude/

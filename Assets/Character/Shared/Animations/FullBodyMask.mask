@@ -1,0 +1,53 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!319 &31900000
+AvatarMask:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: FullBodyMask
+  m_Mask: 01000000010000000100000001000000010000000100000001000000010000000100000001000000010000000100000001000000
+  m_Elements:
+  - m_Path:
+    m_Weight: 1
+  - m_Path: rootSkeleton
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/neck_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/neck_joint/head_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/L_clavicle_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/L_clavicle_joint/L_shoulder_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/L_clavicle_joint/L_shoulder_joint/L_elbow_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/L_clavicle_joint/L_shoulder_joint/L_elbow_joint/L_wrist_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/R_clavicle_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/R_clavicle_joint/R_shoulder_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/R_clavicle_joint/R_shoulder_joint/R_elbow_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/waist_joint/chest_joint/R_clavicle_joint/R_shoulder_joint/R_elbow_joint/R_wrist_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/L_thigh_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/L_thigh_joint/L_knee_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/L_thigh_joint/L_knee_joint/L_ankle_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/R_thigh_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/R_thigh_joint/R_knee_joint
+    m_Weight: 1
+  - m_Path: rootSkeleton/pelvis_joint/R_thigh_joint/R_knee_joint/R_ankle_joint
+    m_Weight: 1

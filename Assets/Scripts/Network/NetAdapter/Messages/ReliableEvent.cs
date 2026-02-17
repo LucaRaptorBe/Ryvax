@@ -226,6 +226,30 @@ namespace MOBANet.NetAdapter.Messages
             };
         }
 
+        /// <summary>
+        /// Create class assign event.
+        /// Sent when a player selects/changes their class.
+        /// </summary>
+        public static ReliableEvent ClassAssign(uint tick, uint entityId, byte classId)
+        {
+            return new ReliableEvent
+            {
+                ServerTick = tick,
+                Type = EventType.ClassAssign,
+                EntityId = entityId,
+                Data1 = classId,
+                Data2 = 0
+            };
+        }
+
+        /// <summary>
+        /// Decode class ID from ClassAssign event
+        /// </summary>
+        public static byte DecodeClassId(ReliableEvent evt)
+        {
+            return (byte)evt.Data1;
+        }
+
         #endregion
     }
 
@@ -259,6 +283,7 @@ namespace MOBANet.NetAdapter.Messages
         PlayerReady = 23,
         PlayerDisconnected = 24,
         PlayerReconnected = 25,
+        ClassAssign = 26,
 
         // Objective events (30-39)
         ObjectiveCaptured = 30,

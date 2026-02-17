@@ -8,6 +8,7 @@ using UnityEngine;
 using MOBANet.GameSim.Entities;
 using MOBANet.UnityView.Core;
 using MOBANet.Diagnostics;
+using MOBANet.Client.Animation;
 
 namespace MOBANet.UnityView.Entities
 {
@@ -22,12 +23,17 @@ namespace MOBANet.UnityView.Entities
         private static readonly int SpeedHash = Animator.StringToHash("Speed");
         private static readonly int IsMovingHash = Animator.StringToHash("IsMoving");
         private static readonly int IsGroundedHash = Animator.StringToHash("IsGrounded");
+        private static readonly int IsJumpingHash = Animator.StringToHash("IsJumping");
+        private static readonly int IsFallingHash = Animator.StringToHash("IsFalling");
 
         #endregion
 
         #region Player-Specific Fields
 
         private SimPlayer _simPlayer;
+        private AnimatorLayerManager _layerManager;
+        private ICharacterClassController _classController;
+        private CharacterClassType _currentClass;
 
         #endregion
 
@@ -45,6 +51,11 @@ namespace MOBANet.UnityView.Entities
             {
                 _animator = GetComponentInChildren<Animator>();
             }
+
+            if (_animator != null)
+            {
+                _layerManager = new AnimatorLayerManager(_animator);
+            }
         }
 
         /// <summary>
@@ -53,6 +64,21 @@ namespace MOBANet.UnityView.Entities
         public void Initialize(SimPlayer simPlayer, bool isLocal, NetworkClient networkClient)
         {
             _simPlayer = simPlayer;
+            _currentClass = (CharacterClassType)simPlayer.ClassId;
+
+            // Activate the appropriate class layer
+            if (_layerManager != null)
+            {
+                _layerManager.SetActiveClass(_currentClass);
+            }
+
+            // Create class-specific controller
+            _classController = CreateClassController(_currentClass);
+            if (_classController != null && _animator != null)
+            {
+                _classController.Initialize(_animator);
+                _classController.OnActivated();
+            }
 
             transform.position = simPlayer.Transform.Position;
 
@@ -91,17 +117,187 @@ namespace MOBANet.UnityView.Entities
         {
             if (_animator == null || _simPlayer == null) return;
 
-            // Use velocity magnitude to determine if moving
+            // Update base layer animations (locomotion, jump, fall)
+            UpdateBaseLayerAnimations();
+
+            // Update class-specific animations
+            _classController?.UpdateAnimations();
+        }
+
+        private void UpdateBaseLayerAnimations()
+        {
             Vector3 velocity = _simPlayer.Transform.Velocity;
             float horizontalSpeed = new Vector2(velocity.x, velocity.z).magnitude;
             bool isMoving = horizontalSpeed > 0.1f;
             bool isGrounded = _simPlayer.Transform.IsGrounded;
-
             float normalizedSpeed = Mathf.Clamp01(horizontalSpeed / 8f);
 
+            // Update locomotion parameters
             _animator.SetFloat(SpeedHash, normalizedSpeed, 0.05f, Time.deltaTime);
             _animator.SetBool(IsMovingHash, isMoving);
             _animator.SetBool(IsGroundedHash, isGrounded);
+
+            // Debug: Log speed values (comment out when not needed)
+            if (_isLocalPlayer && Time.frameCount % 60 == 0) // Log every 60 frames (~1 second)
+            {
+                Debug.Log($"[PlayerView Animation] Speed: {normalizedSpeed:F2} (Raw: {horizontalSpeed:F2} u/s) | " +
+                          $"Velocity: {velocity} | Moving: {isMoving} | Grounded: {isGrounded}");
+            }
+
+            // Update jump/fall parameters based on vertical velocity
+            float verticalVelocity = velocity.y;
+            bool isJumping = !isGrounded && verticalVelocity > 0.5f;
+            bool isFalling = !isGrounded && verticalVelocity < -0.5f;
+
+            _animator.SetBool(IsJumpingHash, isJumping);
+            _animator.SetBool(IsFallingHash, isFalling);
+        }
+
+        #endregion
+
+        #region Class System
+
+        /// <summary>
+        /// Create the appropriate class controller based on ClassId.
+        /// </summary>
+        private ICharacterClassController CreateClassController(CharacterClassType classType)
+        {
+            switch (classType)
+            {
+                case CharacterClassType.Archer:
+                    return new ArcherController();
+                case CharacterClassType.Mage:
+                    return new MageController();
+                case CharacterClassType.Fighter:
+                    return new FighterController();
+                case CharacterClassType.Assassin:
+                    return new AssassinController();
+                case CharacterClassType.Tank:
+                    return new TankController();
+                case CharacterClassType.Healer:
+                    return new HealerController();
+                case CharacterClassType.Summoner:
+                    return new SummonerController();
+                case CharacterClassType.Warrior:
+                    return new WarriorController();
+                case CharacterClassType.None:
+                default:
+                    Debug.LogWarning($"[PlayerView] No class controller for ClassId: {classType}");
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// Change class at runtime (e.g. from ClassAssign event).
+        /// Deactivates old controller, creates new one, updates animation layer.
+        /// </summary>
+        public void SetClass(CharacterClassType classType)
+        {
+            if (classType == _currentClass) return;
+
+            // Deactivate old controller
+            _classController?.OnDeactivated();
+
+            _currentClass = classType;
+
+            // Update animation layer
+            _layerManager?.SetActiveClass(_currentClass);
+
+            // Create new controller
+            _classController = CreateClassController(_currentClass);
+            if (_classController != null && _animator != null)
+            {
+                _classController.Initialize(_animator);
+                _classController.OnActivated();
+            }
+        }
+
+        /// <summary>
+        /// Trigger ability animation from network event.
+        /// Called by NetworkClient when server confirms ability use.
+        /// </summary>
+        public void TriggerAbility(byte abilityIndex)
+        {
+            if (_classController == null)
+            {
+                Debug.LogWarning($"[PlayerView] No class controller to trigger ability {abilityIndex}");
+                return;
+            }
+
+            // Route to appropriate class controller
+            switch (_classController)
+            {
+                case ArcherController archer:
+                    switch (abilityIndex)
+                    {
+                        case 0: archer.TriggerShoot(); break;
+                        case 1: archer.TriggerReload(); break;
+                    }
+                    break;
+
+                case MageController mage:
+                    switch (abilityIndex)
+                    {
+                        case 0: mage.CastFireball(); break;
+                        case 1: mage.CastMeteor(); break;
+                        case 2: mage.CastHeal(); break;
+                    }
+                    break;
+
+                case FighterController fighter:
+                    switch (abilityIndex)
+                    {
+                        case 0: fighter.TriggerAttack(); break;
+                        case 1: fighter.TriggerHeavyAttack(); break;
+                    }
+                    break;
+
+                case AssassinController assassin:
+                    switch (abilityIndex)
+                    {
+                        case 0: assassin.TriggerQuickStrike(); break;
+                        case 1: assassin.TriggerDash(); break;
+                        case 2: assassin.TriggerBackstab(); break;
+                    }
+                    break;
+
+                case TankController tank:
+                    switch (abilityIndex)
+                    {
+                        case 0: tank.TriggerShieldBash(); break;
+                        case 1: tank.TriggerTaunt(); break;
+                        case 2: tank.TriggerGroundSlam(); break;
+                    }
+                    break;
+
+                case HealerController healer:
+                    switch (abilityIndex)
+                    {
+                        case 0: healer.CastHealSingle(); break;
+                        case 1: healer.CastHealAOE(); break;
+                        case 2: healer.CastResurrect(); break;
+                    }
+                    break;
+
+                case SummonerController summoner:
+                    switch (abilityIndex)
+                    {
+                        case 0: summoner.SummonMinion(); break;
+                        case 1: summoner.SummonElemental(); break;
+                        case 2: summoner.SummonDemon(); break;
+                    }
+                    break;
+
+                case WarriorController warrior:
+                    switch (abilityIndex)
+                    {
+                        case 0: warrior.TriggerCharge(); break;
+                        case 1: warrior.TriggerWhirlwind(); break;
+                        case 2: warrior.TriggerExecute(); break;
+                        case 3: warrior.TriggerBattleShout(); break;
+                    }
+                    break;
+            }
         }
 
         #endregion
@@ -110,6 +306,8 @@ namespace MOBANet.UnityView.Entities
 
         protected virtual void OnDestroy()
         {
+            _classController?.OnDeactivated();
+            _classController = null;
             _simPlayer = null;
         }
 

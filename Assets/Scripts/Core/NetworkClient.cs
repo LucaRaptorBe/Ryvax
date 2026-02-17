@@ -18,6 +18,7 @@ using MOBANet.UnityView.Input;
 using MOBANet.Client.Input;
 using MOBANet.GameSim.Commands;
 using MOBANet.Diagnostics;
+using MOBANet.Client.Animation;
 
 // Alias to avoid ambiguity with UnityEngine.EventType
 using NetEventType = MOBANet.NetAdapter.Messages.EventType;
@@ -59,6 +60,7 @@ namespace MOBANet.UnityView.Core
 
         // Input buffer for event commands (UDP redundancy)
         private InputBuffer _eventBuffer;
+        private uint _eventSeq; // Centralized monotonic sequence for ALL event commands
 
         // Outgoing flush guard
         private int _lastOutgoingFlushFrame = -1;
@@ -66,9 +68,19 @@ namespace MOBANet.UnityView.Core
         // V5.0: Local player view reference (dead-reckoning is now in EntityView)
         private PlayerView _localPlayerView;
 
+        // Deferred spawn: local player waits for class selection before creating PlayerView
+        private bool _localSpawnDeferred;
+
         public bool IsConnected => _isConnected;
         public int LocalClientId => _netAdapter?.LocalClientId ?? -1;
         public uint LocalEntityId => _localEntityId;
+        public PlayerView LocalPlayerView => _localPlayerView;
+
+        /// <summary>
+        /// True when the local player entity exists but is waiting for class selection.
+        /// The UI should show class selection when this becomes true.
+        /// </summary>
+        public bool IsWaitingForClassSelection => _localSpawnDeferred;
 
         /// <summary>
         /// Get the visual position for the local player.
@@ -246,10 +258,18 @@ namespace MOBANet.UnityView.Core
 
         #region Event Commands
 
-        public void SendEventCommand(GameCommand cmd)
+        public uint SendEventCommand(GameCommand cmd)
         {
-            if (!_isConnected) return;
+            if (!_isConnected)
+            {
+                Debug.LogWarning($"[NetworkClient] SendEventCommand DROPPED (not connected): Cat={cmd.Category}, Action={cmd.Action}");
+                return 0;
+            }
+            _eventSeq++;
+            cmd.Sequence = _eventSeq;
             _eventBuffer.Add(cmd);
+            Debug.Log($"[NetworkClient] SendEventCommand queued: Cat={cmd.Category}, Action={cmd.Action}, Seq={_eventSeq}, localEntityId={_localEntityId}");
+            return _eventSeq;
         }
 
         public void SendCommand(GameCommand cmd)
@@ -299,6 +319,8 @@ namespace MOBANet.UnityView.Core
             _localEntityId = 0;
             _localInputCollector = null;
             _localPlayerView = null;
+            _localSpawnDeferred = false;
+            _eventSeq = 0;
 
             foreach (var go in _spawnedEntities.Values)
             {
@@ -324,21 +346,19 @@ namespace MOBANet.UnityView.Core
 
                 if (_playerViews.TryGetValue(state.EntityId, out var view))
                 {
-                    // Unified path: both local and remote use the same rendering
+                    // Unified path: all players use the same logic (server-authoritative)
                     view.OnSnapshotReceived(state.Position, state.Velocity, state.Rotation);
 
-                    // Update sim state for remote players
-                    if (state.EntityId != _localEntityId)
+                    // Update SimPlayer state for all players (local and remote)
+                    var simPlayer = _simWorld.GetEntity(state.EntityId) as SimPlayer;
+                    if (simPlayer != null)
                     {
-                        var simPlayer = _simWorld.GetEntity(state.EntityId) as SimPlayer;
-                        if (simPlayer != null)
-                        {
-                            simPlayer.ApplyNetworkState(state.Position, state.Velocity, state.Rotation);
-                        }
+                        simPlayer.ApplyNetworkState(state.Position, state.Velocity, state.Rotation);
                     }
-                    else
+
+                    // Log snapshots for debugging (local player only for clarity)
+                    if (state.EntityId == _localEntityId)
                     {
-                        // Log local player snapshots for debugging
                         MovementCycleLogger.LogSnapshotReceived(snapshot.ServerTick, state.Position, state.Velocity, serverTime);
                     }
                 }
@@ -349,6 +369,7 @@ namespace MOBANet.UnityView.Core
 
         private void OnEventReceived(int _, ReliableEvent evt)
         {
+            Debug.Log($"[NetworkClient] OnEventReceived: Type={evt.Type}, EntityId={evt.EntityId}, Data1={evt.Data1}");
             switch (evt.Type)
             {
                 case NetEventType.EntitySpawn:
@@ -356,6 +377,9 @@ namespace MOBANet.UnityView.Core
                     break;
                 case NetEventType.EntityDeath:
                     OnEntityDeath(evt.EntityId);
+                    break;
+                case NetEventType.ClassAssign:
+                    OnClassAssign(evt);
                     break;
                 case NetEventType.Ping:
                     var pingMeasure = GetComponent<MOBANet.Diagnostics.NetworkPingMeasure>();
@@ -375,24 +399,46 @@ namespace MOBANet.UnityView.Core
         {
             int ownerClientId = ReliableEvent.DecodeOwnerClientId(evt);
             byte teamId = ReliableEvent.DecodeTeamId(evt);
-            bool isLocal = ownerClientId == LocalClientId;
+            bool localIdKnown = LocalClientId >= 0;
+            bool isLocal = localIdKnown && ownerClientId == LocalClientId;
 
             if (_playerViews.ContainsKey(evt.EntityId))
             {
                 _entityOwners[evt.EntityId] = ownerClientId;
-                if (LocalClientId < 0) _pendingLocalPlayerInit = true;
+                if (!localIdKnown) _pendingLocalPlayerInit = true;
                 return;
             }
 
             _entityOwners[evt.EntityId] = ownerClientId;
 
-            if (LocalClientId < 0)
-            {
-                _pendingLocalPlayerInit = true;
-            }
-
             var simPlayer = _simWorld.SpawnPlayer(evt.EntityId, ownerClientId, Vector3.zero, teamId);
 
+            // LocalClientId not yet available: don't spawn any view, wait for TryInitializeLocalPlayer
+            if (!localIdKnown)
+            {
+                _pendingLocalPlayerInit = true;
+                return;
+            }
+
+            // Local player: defer PlayerView creation until class is selected
+            if (isLocal)
+            {
+                _localEntityId = evt.EntityId;
+                _localSpawnDeferred = true;
+                Debug.Log("[NetworkClient] Local player entity created, waiting for class selection...");
+                return;
+            }
+
+            // Remote players: instantiate immediately
+            SpawnPlayerView(evt.EntityId, simPlayer, isLocal: false);
+        }
+
+        /// <summary>
+        /// Instantiate the PlayerView prefab and wire everything up.
+        /// Called immediately for remote players, deferred for local player until class is selected.
+        /// </summary>
+        private void SpawnPlayerView(uint entityId, SimPlayer simPlayer, bool isLocal)
+        {
             if (GameManager.Instance == null || GameManager.Instance.PlayerPrefab == null)
             {
                 Debug.LogError("[NetworkClient] No player prefab assigned in GameManager!");
@@ -401,20 +447,19 @@ namespace MOBANet.UnityView.Core
 
             GameObject prefab = GameManager.Instance.PlayerPrefab;
             var go = Instantiate(prefab, Vector3.zero, Quaternion.identity);
-            go.name = isLocal ? "Player_Local" : $"Player_Remote_{evt.EntityId}";
+            go.name = isLocal ? "Player_Local" : $"Player_Remote_{entityId}";
 
             var view = go.GetComponent<PlayerView>();
             if (view != null)
             {
                 view.Initialize(simPlayer, isLocal: isLocal, networkClient: this);
-                _playerViews[evt.EntityId] = view;
+                _playerViews[entityId] = view;
             }
 
-            _spawnedEntities[evt.EntityId] = go;
+            _spawnedEntities[entityId] = go;
 
             if (isLocal)
             {
-                _localEntityId = evt.EntityId;
                 _localPlayerView = view;
 
                 _localInputCollector = go.GetComponent<InputCollector>();
@@ -428,7 +473,41 @@ namespace MOBANet.UnityView.Core
                     }
                 }
 
+                _localSpawnDeferred = false;
                 GameManager.Instance?.OnNetworkPlayerSpawned(go, isLocalPlayer: true);
+            }
+        }
+
+        private void OnClassAssign(ReliableEvent evt)
+        {
+            byte classId = ReliableEvent.DecodeClassId(evt);
+            var simPlayer = _simWorld.GetEntity<SimPlayer>(evt.EntityId);
+            Debug.Log($"[NetworkClient] OnClassAssign: entityId={evt.EntityId}, classId={classId}, simPlayer={simPlayer != null}");
+            if (simPlayer == null)
+            {
+                Debug.LogWarning($"[NetworkClient] OnClassAssign ABORTED: simPlayer not found for entityId={evt.EntityId}");
+                return;
+            }
+
+            simPlayer.ClassId = classId;
+
+            bool isLocal = _entityOwners.TryGetValue(evt.EntityId, out int ownerId)
+                           && ownerId == LocalClientId;
+
+            Debug.Log($"[NetworkClient] OnClassAssign: isLocal={isLocal}, deferred={_localSpawnDeferred}, hasView={_playerViews.ContainsKey(evt.EntityId)}, ownerId={ownerId}, LocalClientId={LocalClientId}");
+
+            // Local player with deferred spawn: now create the PlayerView
+            if (isLocal && _localSpawnDeferred && !_playerViews.ContainsKey(evt.EntityId))
+            {
+                Debug.Log($"[NetworkClient] Class assigned ({classId}), spawning local PlayerView");
+                SpawnPlayerView(evt.EntityId, simPlayer, isLocal: true);
+                return;
+            }
+
+            // Existing player (remote or local already spawned): update class
+            if (_playerViews.TryGetValue(evt.EntityId, out var view))
+            {
+                view.SetClass((CharacterClassType)classId);
             }
         }
 
@@ -439,40 +518,40 @@ namespace MOBANet.UnityView.Core
 
         private void TryInitializeLocalPlayer()
         {
+            // Find which entity belongs to us
+            uint localId = 0;
+            foreach (var kvp in _entityOwners)
+            {
+                if (kvp.Value == LocalClientId)
+                {
+                    localId = kvp.Key;
+                    break;
+                }
+            }
+
+            if (localId == 0) return; // Our entity not found yet
+
+            _localEntityId = localId;
+            _pendingLocalPlayerInit = false;
+
+            // Local player: defer until class selected (don't spawn view)
+            if (!_playerViews.ContainsKey(localId))
+            {
+                _localSpawnDeferred = true;
+                Debug.Log("[NetworkClient] Local player identified (deferred), waiting for class selection...");
+            }
+
+            // Spawn views for remote players that were also delayed
             foreach (var kvp in _entityOwners)
             {
                 uint entityId = kvp.Key;
-                int ownerClientId = kvp.Value;
+                if (entityId == localId) continue;
+                if (_playerViews.ContainsKey(entityId)) continue;
 
-                if (ownerClientId == LocalClientId && _localEntityId == 0)
+                var simPlayer = _simWorld.GetEntity<SimPlayer>(entityId);
+                if (simPlayer != null)
                 {
-                    _localEntityId = entityId;
-
-                    if (_playerViews.TryGetValue(entityId, out var view))
-                    {
-                        _localPlayerView = view;
-                        var simPlayer = _simWorld.GetEntity<SimPlayer>(entityId);
-                        if (simPlayer != null)
-                        {
-                            view.Initialize(simPlayer, isLocal: true, networkClient: this);
-
-                            _localInputCollector = view.GetComponent<InputCollector>();
-                            if (_localInputCollector != null)
-                            {
-                                var field = typeof(InputCollector).GetField("_networkClient",
-                                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                                if (field != null)
-                                {
-                                    field.SetValue(_localInputCollector, this);
-                                }
-                            }
-
-                            GameManager.Instance?.OnNetworkPlayerSpawned(view.gameObject, isLocalPlayer: true);
-                        }
-                    }
-
-                    _pendingLocalPlayerInit = false;
-                    break;
+                    SpawnPlayerView(entityId, simPlayer, isLocal: false);
                 }
             }
         }

@@ -58,7 +58,9 @@ namespace FishNet.Editing
             #if UNITY_6000_1_OR_NEWER
             string currentDefines = PlayerSettings.GetScriptingDefineSymbols(activeTarget);
             #else
+            #pragma warning disable CS0618 // GetScriptingDefineSymbolsForGroup is obsolete
             string currentDefines = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
+            #pragma warning restore CS0618
             #endif
             
             HashSet<string> definesHs = new();
@@ -82,7 +84,9 @@ namespace FishNet.Editing
                 #if UNITY_6000_1_OR_NEWER
                 PlayerSettings.SetScriptingDefineSymbols(activeTarget, changedDefines);
                 #else
+                #pragma warning disable CS0618 // SetScriptingDefineSymbolsForGroup is obsolete
                 PlayerSettings.SetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup, changedDefines);
+                #pragma warning restore CS0618
                 #endif
             }
 

@@ -1,0 +1,378 @@
+// BaseInterpolator.cs - Interpolates basePos from server snapshots
+// Provides the "truth" position (delayed by buffer) for visual rendering
+// Falls back to extrapolation when snapshots are missing
+
+using UnityEngine;
+using MOBANet.Shared;
+
+namespace MOBANet.Client.Interpolation
+{
+    /// <summary>
+    /// Snapshot state for interpolation.
+    /// Stored in the snapshot buffer.
+    /// </summary>
+    public struct SnapshotState
+    {
+        public float Time;
+        public Vector3 Position;
+        public Vector3 Velocity;
+        public float RotationY;
+        public float Speed;
+
+        // Event flags
+        public bool HasBlinkEvent;
+        public bool HasTeleportEvent;
+        public bool HasStateReset;
+        public bool HasImmobilizeCC;
+
+        public bool IsValid;
+    }
+
+    /// <summary>
+    /// Simple ring buffer for storing snapshots.
+    /// </summary>
+    public class SnapshotBuffer
+    {
+        private readonly SnapshotState[] _buffer;
+        private readonly int _size;
+        private int _writeIndex;
+        private int _count;
+
+        public int Count => _count;
+
+        public SnapshotBuffer(int size = 32)
+        {
+            _size = size;
+            _buffer = new SnapshotState[size];
+        }
+
+        public void Add(SnapshotState state, float serverTime)
+        {
+            state.Time = serverTime;
+            state.IsValid = true;
+
+            _buffer[_writeIndex] = state;
+            _writeIndex = (_writeIndex + 1) % _size;
+            if (_count < _size) _count++;
+        }
+
+        /// <summary>
+        /// Find two snapshots bracketing the given time for interpolation.
+        /// </summary>
+        public bool FindBracketingSnapshots(float time, out SnapshotState a, out SnapshotState b, out float alpha)
+        {
+            a = default;
+            b = default;
+            alpha = 0;
+
+            if (_count < 2) return false;
+
+            // Find the two snapshots that bracket 'time'
+            for (int i = 0; i < _count - 1; i++)
+            {
+                int idx1 = GetIndex(i);
+                int idx2 = GetIndex(i + 1);
+
+                var s1 = _buffer[idx1];
+                var s2 = _buffer[idx2];
+
+                if (s1.IsValid && s2.IsValid && s1.Time <= time && s2.Time >= time)
+                {
+                    a = s1;
+                    b = s2;
+
+                    float duration = s2.Time - s1.Time;
+                    alpha = duration > 0.0001f ? (time - s1.Time) / duration : 0f;
+                    alpha = Mathf.Clamp01(alpha);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Get the most recent snapshot.
+        /// </summary>
+        public SnapshotState? GetLatest()
+        {
+            if (_count == 0) return null;
+
+            int idx = (_writeIndex - 1 + _size) % _size;
+            return _buffer[idx].IsValid ? _buffer[idx] : null;
+        }
+
+        public void Clear()
+        {
+            _writeIndex = 0;
+            _count = 0;
+            for (int i = 0; i < _size; i++)
+            {
+                _buffer[i] = default;
+            }
+        }
+
+        /// <summary>
+        /// Purge all snapshots before the given time.
+        /// Used after discontinuity to avoid re-interpolating through it.
+        /// </summary>
+        public void PurgeSnapshotsBefore(float time)
+        {
+            // Mark old snapshots as invalid
+            for (int i = 0; i < _size; i++)
+            {
+                if (_buffer[i].IsValid && _buffer[i].Time < time)
+                {
+                    _buffer[i].IsValid = false;
+                }
+            }
+
+            // Recount valid entries
+            int validCount = 0;
+            for (int i = 0; i < _size; i++)
+            {
+                if (_buffer[i].IsValid) validCount++;
+            }
+            _count = validCount;
+        }
+
+        private int GetIndex(int offset)
+        {
+            return (_writeIndex - _count + offset + _size) % _size;
+        }
+    }
+
+    /// <summary>
+    /// Quality of the last basePos calculation.
+    /// Used by VisualOffsetCorrector to decide absorb behavior.
+    /// </summary>
+    public enum BasePosQuality
+    {
+        Interpolated,   // Normal: two snapshots available
+        Extrapolated,   // Fallback: single snapshot, dead-reckoning
+        Frozen          // No valid extrapolation, holding last known
+    }
+
+    /// <summary>
+    /// Interpolates basePos from server snapshots.
+    ///
+    /// Primary: Linear interpolation between two bracketing snapshots
+    /// Fallback: Extrapolation if no bracketing snapshots available
+    ///   - Soft horizon (100ms): normal dead-reckoning
+    ///   - Hard horizon (150ms): max extrapolation, then freeze
+    ///
+    /// Detects discontinuities (teleport, blink) and signals them.
+    /// Without pathfinding, extrapolation is simple linear dead-reckoning.
+    /// </summary>
+    public class BaseInterpolator
+    {
+        private readonly SnapshotBuffer _buffer;
+
+        // Extrapolation horizons (V2.3: reduced hard horizon for dead-reckoning)
+        private const float HORIZON_SOFT = 0.1f;   // 100ms normal extrapolation
+        private const float HORIZON_HARD = 0.15f;  // 150ms max extrapolation (V2.3: was 200ms)
+
+        // Last valid state (for freeze fallback)
+        private Vector3 _lastValidBasePos;
+        private float _lastValidRotationY;
+        private bool _isFrozen;
+
+        /// <summary>
+        /// True if the last GetBasePos detected a discontinuity.
+        /// Used by VisualOffsetCorrector to trigger snap.
+        /// </summary>
+        public bool HadDiscontinuity { get; private set; }
+
+        /// <summary>
+        /// Time of the discontinuity (for selective purge).
+        /// </summary>
+        public float DiscontinuityTime { get; private set; }
+
+        /// <summary>
+        /// Quality of the last basePos calculation (V2.3).
+        /// Interpolated = normal, Extrapolated = dead-reckoning, Frozen = no data.
+        /// </summary>
+        public BasePosQuality Quality { get; private set; }
+
+        /// <summary>
+        /// True if currently frozen (no extrapolation, holding last position).
+        /// </summary>
+        public bool IsFrozen => _isFrozen;
+
+        public BaseInterpolator()
+        {
+            _buffer = new SnapshotBuffer();
+        }
+
+        /// <summary>
+        /// Add a new snapshot from the server.
+        /// </summary>
+        public void OnSnapshotReceived(SnapshotState state, float serverTime)
+        {
+            _buffer.Add(state, serverTime);
+            _isFrozen = false;  // New snapshot -> unfreeze
+        }
+
+        /// <summary>
+        /// Get the interpolated base position at render time.
+        /// Also sets Quality property (Interpolated/Extrapolated/Frozen).
+        /// </summary>
+        /// <param name="renderTime">Render time (server time - buffer)</param>
+        /// <returns>Interpolated position</returns>
+        public Vector3 GetBasePos(float renderTime)
+        {
+            HadDiscontinuity = false;
+            DiscontinuityTime = 0f;
+
+            // INTERPOLATION DISABLED: Return latest snapshot directly
+            if (NetcodeConstants.INTERPOLATION_DISABLED)
+            {
+                var latest = _buffer.GetLatest();
+                if (latest == null)
+                {
+                    Quality = BasePosQuality.Frozen;
+                    return _lastValidBasePos;
+                }
+
+                Quality = BasePosQuality.Interpolated; // Technically not interpolated, but valid data
+                _lastValidBasePos = latest.Value.Position;
+                _lastValidRotationY = latest.Value.RotationY;
+                return _lastValidBasePos;
+            }
+
+            // Case 1: Two snapshots available for interpolation
+            if (_buffer.FindBracketingSnapshots(renderTime, out var a, out var b, out float alpha))
+            {
+                // Check for discontinuity between A and B
+                if (HasDiscontinuityBetween(a, b))
+                {
+                    // Don't interpolate through a blink/teleport
+                    // Snap to B directly
+                    HadDiscontinuity = true;
+                    DiscontinuityTime = b.Time;
+                    Quality = BasePosQuality.Interpolated;  // Still considered interpolated (valid data)
+                    _lastValidBasePos = b.Position;
+                    _lastValidRotationY = b.RotationY;
+                    return b.Position;
+                }
+
+                // Normal interpolation
+                Quality = BasePosQuality.Interpolated;
+                _lastValidBasePos = Vector3.Lerp(a.Position, b.Position, alpha);
+                _lastValidRotationY = Mathf.LerpAngle(a.RotationY, b.RotationY, alpha);
+                return _lastValidBasePos;
+            }
+
+            // Case 2: No bracketing snapshots -> extrapolation fallback
+            // Quality is set by ExtrapolateFromLatest
+            return ExtrapolateFromLatest(renderTime);
+        }
+
+        /// <summary>
+        /// Get the interpolated rotation at render time.
+        /// </summary>
+        public float GetBaseRotationY(float renderTime)
+        {
+            // INTERPOLATION DISABLED: Return latest snapshot rotation directly
+            if (NetcodeConstants.INTERPOLATION_DISABLED)
+            {
+                var latest = _buffer.GetLatest();
+                if (latest != null)
+                {
+                    _lastValidRotationY = latest.Value.RotationY;
+                }
+                return _lastValidRotationY;
+            }
+
+            if (_buffer.FindBracketingSnapshots(renderTime, out var a, out var b, out float alpha))
+            {
+                if (HasDiscontinuityBetween(a, b))
+                {
+                    return b.RotationY;
+                }
+                return Mathf.LerpAngle(a.RotationY, b.RotationY, alpha);
+            }
+
+            return _lastValidRotationY;
+        }
+
+        /// <summary>
+        /// Check if there's a discontinuity between two snapshots.
+        /// </summary>
+        private bool HasDiscontinuityBetween(SnapshotState a, SnapshotState b)
+        {
+            // Any of these events means we shouldn't interpolate through
+            return b.HasBlinkEvent || b.HasTeleportEvent || b.HasStateReset;
+        }
+
+        /// <summary>
+        /// Extrapolate from the latest snapshot when no bracketing pair exists.
+        /// Uses simple linear dead-reckoning (pos + vel * dt).
+        /// Sets Quality to Extrapolated or Frozen.
+        /// </summary>
+        private Vector3 ExtrapolateFromLatest(float renderTime)
+        {
+            var latest = _buffer.GetLatest();
+            if (latest == null)
+            {
+                Quality = BasePosQuality.Frozen;
+                return _lastValidBasePos;
+            }
+
+            var state = latest.Value;
+            float dt = renderTime - state.Time;
+
+            // Level 1: Soft horizon (normal dead-reckoning)
+            if (dt <= HORIZON_SOFT)
+            {
+                Quality = BasePosQuality.Extrapolated;
+                _lastValidBasePos = state.Position + state.Velocity * dt;
+                return _lastValidBasePos;
+            }
+
+            // Level 2: Hard horizon (capped extrapolation)
+            if (dt <= HORIZON_HARD)
+            {
+                // Cap extrapolation at hard horizon
+                Quality = BasePosQuality.Extrapolated;
+                float cappedDt = Mathf.Min(dt, HORIZON_HARD);
+                _lastValidBasePos = state.Position + state.Velocity * cappedDt;
+                return _lastValidBasePos;
+            }
+
+            // Beyond hard horizon: freeze (no extrapolation to avoid hallucination)
+            Quality = BasePosQuality.Frozen;
+            _isFrozen = true;
+            return _lastValidBasePos;
+        }
+
+        /// <summary>
+        /// Clear the entire buffer (e.g., on reconnect or state reset).
+        /// </summary>
+        public void PurgeBuffer()
+        {
+            _buffer.Clear();
+        }
+
+        /// <summary>
+        /// Purge snapshots before a given time.
+        /// Used after discontinuity to avoid re-interpolating through it.
+        /// </summary>
+        public void PurgeSnapshotsBefore(float time)
+        {
+            _buffer.PurgeSnapshotsBefore(time);
+        }
+
+        /// <summary>
+        /// Reset all state.
+        /// </summary>
+        public void Reset()
+        {
+            _buffer.Clear();
+            _lastValidBasePos = Vector3.zero;
+            _lastValidRotationY = 0;
+            _isFrozen = false;
+            HadDiscontinuity = false;
+        }
+    }
+}

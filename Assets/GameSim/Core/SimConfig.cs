@@ -22,21 +22,6 @@ namespace MOBANet.GameSim.Core
         public float PlayerMoveSpeed { get; set; } = NetcodeConstants.PLAYER_SPEED;
 
         /// <summary>
-        /// Player acceleration (for smooth movement)
-        /// </summary>
-        public float PlayerAcceleration { get; set; } = 50f;
-
-        /// <summary>
-        /// Player deceleration when stopping
-        /// </summary>
-        public float PlayerDeceleration { get; set; } = 40f;
-
-        /// <summary>
-        /// Maximum player velocity
-        /// </summary>
-        public float PlayerMaxSpeed { get; set; } = 15f;
-
-        /// <summary>
         /// Player rotation speed in degrees per second.
         /// 720°/s = 2 full rotations per second (0.25s for 180° turn).
         /// </summary>
@@ -111,12 +96,17 @@ namespace MOBANet.GameSim.Core
 
         #endregion
 
-        #region Gravity (DreamGame-1)
+        #region Physics (DreamGame-style)
 
         /// <summary>
         /// Gravity acceleration (negative = downward)
         /// </summary>
         public float Gravity { get; set; } = -20f;
+
+        /// <summary>
+        /// Terminal velocity (max falling speed)
+        /// </summary>
+        public float TerminalVelocity { get; set; } = -50f;
 
         /// <summary>
         /// Jump height in units
@@ -132,6 +122,29 @@ namespace MOBANet.GameSim.Core
         /// Pull-down velocity when grounded to maintain contact
         /// </summary>
         public float GroundedPullDown { get; set; } = -2f;
+
+        /// <summary>
+        /// Ground friction/drag (high = quick stop after impulse)
+        /// Exponential decay: v *= e^(-drag * dt)
+        /// 15 = impulses fade in ~0.2s
+        /// </summary>
+        public float GroundDrag { get; set; } = 15f;
+
+        /// <summary>
+        /// Air friction/drag (low = momentum preserved)
+        /// 0.5 = momentum preserved longer in air
+        /// </summary>
+        public float AirDrag { get; set; } = 0.5f;
+
+        /// <summary>
+        /// Angle threshold before turn slowdown kicks in (degrees)
+        /// </summary>
+        public float TurnSlowdownAngle { get; set; } = 90f;
+
+        /// <summary>
+        /// Speed multiplier at 180° turn (0.2 = 20% speed)
+        /// </summary>
+        public float TurnSlowdownMultiplier { get; set; } = 0.2f;
 
         #endregion
 
@@ -194,9 +207,6 @@ namespace MOBANet.GameSim.Core
             {
                 // Movement
                 PlayerMoveSpeed = this.PlayerMoveSpeed,
-                PlayerAcceleration = this.PlayerAcceleration,
-                PlayerDeceleration = this.PlayerDeceleration,
-                PlayerMaxSpeed = this.PlayerMaxSpeed,
                 PlayerRotationSpeed = this.PlayerRotationSpeed,
 
                 // Combat
@@ -227,11 +237,16 @@ namespace MOBANet.GameSim.Core
                 InterpolationDelay = this.InterpolationDelay,
                 ReconciliationThreshold = this.ReconciliationThreshold,
 
-                // Gravity
+                // Physics
                 Gravity = this.Gravity,
+                TerminalVelocity = this.TerminalVelocity,
                 JumpHeight = this.JumpHeight,
                 AirControlStrength = this.AirControlStrength,
                 GroundedPullDown = this.GroundedPullDown,
+                GroundDrag = this.GroundDrag,
+                AirDrag = this.AirDrag,
+                TurnSlowdownAngle = this.TurnSlowdownAngle,
+                TurnSlowdownMultiplier = this.TurnSlowdownMultiplier,
             };
         }
 

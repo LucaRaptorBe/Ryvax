@@ -85,4 +85,12 @@ namespace MOBANet.Shared
         public const byte Request = 1;   // Client → Server ping request
         public const byte Response = 2;  // Server → Client pong response (via ReliableEvent)
     }
+
+    /// <summary>
+    /// System actions (class selection, etc.)
+    /// </summary>
+    public static class SystemAction
+    {
+        public const byte ClassSelect = 1;
+    }
 }

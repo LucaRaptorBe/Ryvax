@@ -109,6 +109,11 @@ namespace MOBANet.GameSim.Commands
         /// </summary>
         public bool IsDash => IsMovement && Action == MovementAction.Dash;
 
+        /// <summary>
+        /// Is this a jump command?
+        /// </summary>
+        //public bool IsJump => IsMovement && Action == MovementAction.Jump;
+
         #endregion
 
         public override string ToString()

@@ -844,6 +844,27 @@ namespace MOBANet.Server
                 return;
             }
 
+            // Handle class selection
+            if (cmd.Category == CommandCategory.System && cmd.Action == SystemAction.ClassSelect)
+            {
+                var selectPlayer = _simWorld.GetPlayerByClient(clientId);
+                Debug.Log($"[ServerGameLoop] ClassSelect received: clientId={clientId}, classId={cmd.Data0}, seq={cmd.Sequence}, player={selectPlayer?.Id}");
+                if (selectPlayer != null)
+                {
+                    selectPlayer.ClassId = cmd.Data0;
+                    var classEvent = ReliableEvent.ClassAssign(
+                        serverTick, selectPlayer.Id, (byte)cmd.Data0);
+                    _netAdapter.SendToAll(classEvent, reliable: true);
+                    Debug.Log($"[ServerGameLoop] ClassAssign broadcast: entityId={selectPlayer.Id}, classId={cmd.Data0}");
+                }
+                else
+                {
+                    Debug.LogWarning($"[ServerGameLoop] ClassSelect FAILED: no player for clientId={clientId}");
+                }
+                _commandBuffer.AckCommand(clientId, cmd.Sequence);
+                return;
+            }
+
             // METRIC B: Handle ping request - echo back immediately
             if (cmd.Category == CommandCategory.Ping && cmd.Action == PingAction.Request)
             {

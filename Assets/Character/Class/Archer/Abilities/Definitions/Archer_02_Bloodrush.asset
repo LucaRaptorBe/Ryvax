@@ -1,0 +1,32 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 08d0ca53536554a4ba35835a24bc2a31, type: 3}
+  m_Name: Archer_02_Bloodrush
+  m_EditorClassIdentifier: 
+  abilityName: Bloodrush
+  description: Self buff for 4s granting 25/35/45% attack speed. Next basic attack
+    is empowered dealing 40/70/100 bonus physical damage. Recast refreshes empowered
+    attack and extends duration by 4s (max 8s).
+  icon: {fileID: 0}
+  baseDamage: 40
+  baseCooldown: 12
+  baseRange: 0
+  targetType: 1
+  targetFilter: 1
+  spec1Name: Marked Prey
+  spec1: Empowered attack marks target until Bloodrush ends. Basic attacks against
+    marked target gain +200 range.
+  spec2Name: Ricochet Mark
+  spec2: Empowered attack marks target until Bloodrush ends. Basic attacks against
+    marked target bounce to up to 3 nearby enemies dealing 60% damage.
+  spec3Name: 
+  spec3: 

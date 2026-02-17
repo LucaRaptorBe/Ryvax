@@ -128,6 +128,22 @@ namespace MOBANet.NetAdapter.Messages
             };
         }
 
+        /// <summary>
+        /// Create a jump command
+        /// </summary>
+/*         public static GameCommand Jump(uint seq)
+        {
+            return new GameCommand
+            {
+                Sequence = seq,
+                Category = CommandCategory.Movement,
+                Action = MovementAction.Jump,
+                Data0 = 0,
+                Data1 = 0,
+                Data2 = 0
+            };
+        } */
+
         #endregion
 
         #region Factory Methods - Abilities
@@ -297,6 +313,26 @@ namespace MOBANet.NetAdapter.Messages
                 Action = ItemAction.Swap,
                 Data0 = fromSlot,
                 Data1 = toSlot,
+                Data2 = 0
+            };
+        }
+
+        #endregion
+
+        #region Factory Methods - System
+
+        /// <summary>
+        /// Create a class selection command
+        /// </summary>
+        public static GameCommand ClassSelect(uint seq, byte classId)
+        {
+            return new GameCommand
+            {
+                Sequence = seq,
+                Category = CommandCategory.System,
+                Action = SystemAction.ClassSelect,
+                Data0 = classId,
+                Data1 = 0,
                 Data2 = 0
             };
         }

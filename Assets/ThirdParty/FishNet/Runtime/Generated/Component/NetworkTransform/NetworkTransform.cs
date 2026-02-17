@@ -860,7 +860,9 @@ namespace FishNet.Component.Transforming
                     #if UNITY_6000_1_OR_NEWER
                     c.bodyType = isKinematic ? RigidbodyType2D.Kinematic : RigidbodyType2D.Dynamic;
                     #else
+                    #pragma warning disable CS0618 // isKinematic is obsolete
                     c.isKinematic = isKinematic;
+                    #pragma warning restore CS0618
                     #endif
 
                     c.simulated = !isKinematic;

@@ -39,7 +39,7 @@ namespace FishNet.Transporting.Tugboat
         internal bool ReuseAddress => _reuseAddress;
         [Tooltip("Allows the same address and port to be used multiple times by the server. This can be useful if you wish to launch multiple builds or server instances on the same machine using the same configuration.")]
         [SerializeField]
-        private bool _reuseAddress;
+        private bool _reuseAddress = true;
         /* Channels. */
         /// <summary>
         /// Maximum transmission unit for the unreliable channel.
@@ -60,7 +60,7 @@ namespace FishNet.Transporting.Tugboat
         /// </summary>
         [Tooltip("Enable IPv6, Server listens on IPv4 and IPv6 address")]
         [SerializeField]
-        private bool _enableIpv6 = true;
+        private bool _enableIpv6 = false;
         /// <summary>
         /// IPv6 address to bind server to.
         /// </summary>

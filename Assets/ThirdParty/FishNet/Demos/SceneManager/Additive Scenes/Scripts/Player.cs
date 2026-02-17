@@ -60,7 +60,7 @@ namespace FishNet.Demo.AdditiveScenes
             if (!IsServerStarted)
                 return false;
             
-            _wayPoints = FindObjectsOfType<Waypoint>().ToList();
+            _wayPoints = FindObjectsByType<Waypoint>(FindObjectsSortMode.None).ToList();
             /* There are expected 4 waypoints in this test -- if only
              * one is found then the other scenes did not load yet. */
             if (_wayPoints.Count != 4)

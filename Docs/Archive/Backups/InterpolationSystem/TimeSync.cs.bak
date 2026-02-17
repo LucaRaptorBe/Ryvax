@@ -1,0 +1,174 @@
+// TimeSync.cs - Unified timing system with PLL and adaptive buffer
+// Provides stable RenderTime for interpolation (local + remote players)
+//
+// V3.0: Unified system replacing both old TimeSync and NetworkClient._perceivedServerTime
+// - PLL (Phase-Locked Loop) for smooth time tracking
+// - Adaptive buffer based on jitter (80-160ms range)
+
+using UnityEngine;
+using MOBANet.Shared;
+
+namespace MOBANet.Client.Timing
+{
+    /// <summary>
+    /// Unified timing system for snapshot interpolation.
+    ///
+    /// Uses PLL (Phase-Locked Loop) to maintain smooth perceived server time:
+    /// - Tracks server time between snapshots
+    /// - Adjusts playback rate to maintain target buffer
+    /// - Adapts buffer size based on network jitter
+    ///
+    /// Buffer range: 80-160ms (adaptive to jitter)
+    /// - Low jitter: buffer stays near 100ms target
+    /// - High jitter: buffer increases to absorb variance
+    /// </summary>
+    public class TimeSync
+    {
+        // Buffer configuration
+        private const float TARGET_BUFFER = 0.1f;      // 100ms target
+        private const float MIN_BUFFER = 0.08f;        // 80ms minimum
+        private const float MAX_BUFFER = 0.16f;        // 160ms maximum
+        private const float JITTER_GAIN = 0.5f;        // Jitter compensation factor
+
+        // PLL configuration
+        private const float PLL_GAIN = 0.2f;           // How fast to correct offset
+        private const float PLAYBACK_MIN = 0.9f;       // Slowest playback rate
+        private const float PLAYBACK_MAX = 1.1f;       // Fastest playback rate
+
+        // Jitter estimation (EMA smoothing)
+        private const float JITTER_SMOOTHING = 0.1f;   // EMA alpha
+
+        // State
+        private float _estimatedJitter;
+        private float _adaptiveBuffer = TARGET_BUFFER;
+        private float _perceivedServerTime;            // PLL-corrected time (smooth)
+        private float _newestSnapshotTime;             // Latest snapshot time (jumpy)
+        private float _lastSnapshotArrivalTime;
+        private bool _initialized;
+
+        /// <summary>
+        /// Render time = perceived server time - adaptive buffer.
+        /// Use this for interpolation lookups.
+        /// When INTERPOLATION_DISABLED: returns current server time (no buffer delay).
+        /// </summary>
+        public float RenderTime => NetcodeConstants.INTERPOLATION_DISABLED
+            ? _newestSnapshotTime  // No buffer delay - use latest server time directly
+            : _perceivedServerTime - _adaptiveBuffer;
+
+        /// <summary>
+        /// Perceived server time (PLL-corrected, smooth).
+        /// Use this for remote player interpolation.
+        /// </summary>
+        public float PerceivedServerTime => _perceivedServerTime;
+
+        /// <summary>
+        /// Current adaptive buffer in seconds.
+        /// Exposed for dynamic threshold calculations.
+        /// </summary>
+        public float AdaptiveBuffer => _adaptiveBuffer;
+
+        /// <summary>
+        /// Latest snapshot server time (not smoothed).
+        /// </summary>
+        public float LatestServerTime => _newestSnapshotTime;
+
+        /// <summary>
+        /// Estimated network jitter in seconds.
+        /// </summary>
+        public float EstimatedJitter => _estimatedJitter;
+
+        /// <summary>
+        /// Whether TimeSync has received at least one snapshot.
+        /// </summary>
+        public bool IsInitialized => _initialized;
+
+        /// <summary>
+        /// Call when a snapshot is received from the server.
+        /// Updates jitter estimation, adaptive buffer, and newest snapshot time.
+        /// </summary>
+        /// <param name="serverTime">Server time from snapshot</param>
+        public void OnSnapshotReceived(float serverTime)
+        {
+            float now = Time.unscaledTime;
+
+            if (_initialized)
+            {
+                // Estimate jitter based on snapshot arrival variance
+                float expectedDelta = NetcodeConstants.TICK_DELTA;
+                float actualDelta = serverTime - _newestSnapshotTime;
+                float jitterSample = Mathf.Abs(actualDelta - expectedDelta);
+
+                // Exponential moving average for jitter
+                _estimatedJitter = Mathf.Lerp(_estimatedJitter, jitterSample, JITTER_SMOOTHING);
+
+                // Adaptive buffer: target + jitter compensation
+                float targetBuffer = TARGET_BUFFER + JITTER_GAIN * _estimatedJitter;
+                _adaptiveBuffer = Mathf.Clamp(targetBuffer, MIN_BUFFER, MAX_BUFFER);
+            }
+            else
+            {
+                // First snapshot: initialize perceived time with target offset
+                _perceivedServerTime = serverTime - TARGET_BUFFER;
+                _initialized = true;
+            }
+
+            _newestSnapshotTime = serverTime;
+            _lastSnapshotArrivalTime = now;
+        }
+
+        /// <summary>
+        /// Advance perceived server time using PLL.
+        /// Call this every frame to maintain smooth render time progression.
+        ///
+        /// PLL adjusts playback rate to maintain target buffer:
+        /// - Too far behind (buffer growing): speed up
+        /// - Too close (buffer shrinking): slow down
+        /// </summary>
+        /// <param name="dt">Delta time since last frame</param>
+        public void Update(float dt)
+        {
+            if (!_initialized) return;
+
+            // INTERPOLATION DISABLED: Use fixed playback rate (no PLL adjustment)
+            if (NetcodeConstants.INTERPOLATION_DISABLED)
+            {
+                // Simply advance time at 1:1 rate, no smoothing
+                _perceivedServerTime += dt;
+                return;
+            }
+
+            // PLL: Calculate how far we are from target buffer
+            float currentOffset = _newestSnapshotTime - _perceivedServerTime;
+            float offsetError = currentOffset - _adaptiveBuffer;
+
+            // Adjust playback rate based on offset error
+            float playbackRate = 1.0f + PLL_GAIN * offsetError;
+            playbackRate = Mathf.Clamp(playbackRate, PLAYBACK_MIN, PLAYBACK_MAX);
+
+            // Advance perceived time with adjusted rate
+            _perceivedServerTime += dt * playbackRate;
+        }
+
+        /// <summary>
+        /// Reset state (e.g., on reconnect).
+        /// </summary>
+        public void Reset()
+        {
+            _estimatedJitter = 0;
+            _adaptiveBuffer = TARGET_BUFFER;
+            _perceivedServerTime = 0;
+            _newestSnapshotTime = 0;
+            _lastSnapshotArrivalTime = 0;
+            _initialized = false;
+        }
+
+        /// <summary>
+        /// Get debug info string.
+        /// </summary>
+        public string GetDebugInfo()
+        {
+            float currentOffset = _newestSnapshotTime - _perceivedServerTime;
+            return $"TimeSync: buffer={_adaptiveBuffer * 1000:F0}ms offset={currentOffset * 1000:F0}ms jitter={_estimatedJitter * 1000:F0}ms";
+        }
+    }
+}

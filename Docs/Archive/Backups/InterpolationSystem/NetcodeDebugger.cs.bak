@@ -1,0 +1,233 @@
+// NetcodeDebugger.cs - DISABLED (V4.0)
+// Re-enable by removing #if false / #endif
+
+#if false
+
+// NetcodeDebugger.cs - Debug logging for LoL-style netcode (V4.0 Pure LoL)
+// Attach to a GameObject to monitor netcode behavior
+// Enable/disable specific log categories via inspector
+//
+// V4.0 Changes:
+// - Removed offset/absorb/snap tracking (no longer used in Pure LoL model)
+// - Simplified interface: quality, position, buffer, intent
+
+using UnityEngine;
+using MOBANet.Client.Interpolation;
+
+namespace MOBANet.Diagnostics
+{
+    /// <summary>
+    /// Debug logging for LoL-style netcode (V4.0 Pure LoL).
+    /// Monitors and logs key metrics to verify implementation correctness.
+    /// </summary>
+    public class NetcodeDebugger : MonoBehaviour
+    {
+        [Header("References")]
+        [SerializeField] private MonoBehaviour _networkClientRef;  // Cast to NetworkClient at runtime
+
+        [Header("Log Categories")]
+        [SerializeField] private bool _logQuality = true;          // BasePosQuality changes
+        [SerializeField] private bool _logIntents = true;          // Intent sending
+        [SerializeField] private bool _logSnapshots = false;       // Snapshot reception (verbose)
+        [SerializeField] private bool _logPosition = false;        // Position logging (verbose)
+
+        [Header("Thresholds")]
+        [SerializeField] private float _statsInterval = 5f;        // Stats summary interval
+
+        [Header("On-Screen Display")]
+        [SerializeField] private bool _showOnScreen = true;
+        [SerializeField] private Vector2 _displayPosition = new Vector2(10, 10);
+
+        // Stats tracking
+        private int _interpolatedFrames;
+        private int _extrapolatedFrames;
+        private int _frozenFrames;
+        private float _statsTimer;
+
+        // State tracking
+        private BasePosQuality _lastQuality;
+        private bool _wasImmobilized;
+        private Vector3 _lastPosition;
+
+        // Cached interface (set via reflection or direct assignment)
+        private INetcodeDebugSource _source;
+
+        void Start()
+        {
+            // Try to get debug source from NetworkClient
+            if (_networkClientRef != null)
+            {
+                _source = _networkClientRef as INetcodeDebugSource;
+                if (_source == null)
+                {
+                    UnityEngine.Debug.LogWarning("[NetcodeDebugger] NetworkClient does not implement INetcodeDebugSource");
+                }
+            }
+        }
+
+        void Update()
+        {
+            if (_source == null) return;
+
+            var quality = _source.GetBasePosQuality();
+            var position = _source.GetVisualPosition();
+            var speed = _source.GetCurrentSpeed();
+            var isImmobilized = _source.IsImmobilized();
+            var hasIntent = _source.HasLocalMoveIntent();
+
+            // Track quality changes
+            if (quality != _lastQuality)
+            {
+                if (_logQuality)
+                {
+                    UnityEngine.Debug.Log($"[Netcode] Quality: {_lastQuality} -> {quality}");
+                }
+                _lastQuality = quality;
+            }
+
+            // Track quality stats
+            switch (quality)
+            {
+                case BasePosQuality.Interpolated: _interpolatedFrames++; break;
+                case BasePosQuality.Extrapolated: _extrapolatedFrames++; break;
+                case BasePosQuality.Frozen: _frozenFrames++; break;
+            }
+
+            // Track immobilize state
+            if (isImmobilized != _wasImmobilized)
+            {
+                UnityEngine.Debug.Log($"[Netcode] Immobilize: {_wasImmobilized} -> {isImmobilized}");
+                _wasImmobilized = isImmobilized;
+            }
+
+            // Position logging (verbose)
+            if (_logPosition && speed > 0.1f)
+            {
+                UnityEngine.Debug.Log($"[Netcode] Position: {position:F1} speed={speed:F1} intent={hasIntent}");
+            }
+
+            _lastPosition = position;
+
+            // Stats summary
+            _statsTimer += Time.deltaTime;
+            if (_statsTimer >= _statsInterval)
+            {
+                LogStatsSummary();
+                ResetStats();
+                _statsTimer = 0;
+            }
+        }
+
+        void OnGUI()
+        {
+            if (!_showOnScreen || _source == null) return;
+
+            var quality = _source.GetBasePosQuality();
+            var position = _source.GetVisualPosition();
+            var speed = _source.GetCurrentSpeed();
+            var buffer = _source.GetAdaptiveBuffer() * 1000f;
+            var isImmobilized = _source.IsImmobilized();
+            var hasIntent = _source.HasLocalMoveIntent();
+
+            int totalFrames = _interpolatedFrames + _extrapolatedFrames + _frozenFrames;
+            float interpRatio = totalFrames > 0 ? (float)_interpolatedFrames / totalFrames * 100f : 0;
+
+            string qualityColor = quality switch
+            {
+                BasePosQuality.Interpolated => "green",
+                BasePosQuality.Extrapolated => "yellow",
+                BasePosQuality.Frozen => "red",
+                _ => "white"
+            };
+
+            string immobColor = isImmobilized ? "red" : "green";
+            string intentColor = hasIntent ? "cyan" : "gray";
+
+            GUIStyle style = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                richText = true
+            };
+
+            float y = _displayPosition.y;
+            float lineHeight = 18f;
+
+            GUI.Label(new Rect(_displayPosition.x, y, 400, lineHeight),
+                $"<b>LoL Netcode V4.0 Pure</b>", style);
+            y += lineHeight;
+
+            GUI.Label(new Rect(_displayPosition.x, y, 400, lineHeight),
+                $"Quality: <color={qualityColor}>{quality}</color> | Interp: {interpRatio:F0}%", style);
+            y += lineHeight;
+
+            GUI.Label(new Rect(_displayPosition.x, y, 400, lineHeight),
+                $"Position: ({position.x:F1}, {position.y:F1}, {position.z:F1})", style);
+            y += lineHeight;
+
+            GUI.Label(new Rect(_displayPosition.x, y, 400, lineHeight),
+                $"Speed: {speed:F1} | Buffer: {buffer:F0}ms", style);
+            y += lineHeight;
+
+            GUI.Label(new Rect(_displayPosition.x, y, 400, lineHeight),
+                $"Immob: <color={immobColor}>{isImmobilized}</color> | Intent: <color={intentColor}>{hasIntent}</color>", style);
+        }
+
+        private void LogStatsSummary()
+        {
+            int totalFrames = _interpolatedFrames + _extrapolatedFrames + _frozenFrames;
+            if (totalFrames == 0) return;
+
+            float interpPercent = (float)_interpolatedFrames / totalFrames * 100f;
+            float extrapPercent = (float)_extrapolatedFrames / totalFrames * 100f;
+            float frozenPercent = (float)_frozenFrames / totalFrames * 100f;
+
+            UnityEngine.Debug.Log($"[Netcode Stats] " +
+                $"Quality: Interp={interpPercent:F1}% Extrap={extrapPercent:F1}% Frozen={frozenPercent:F1}%");
+
+            // Warnings
+            if (extrapPercent > 10f)
+            {
+                UnityEngine.Debug.LogWarning($"[Netcode] High extrapolation rate: {extrapPercent:F1}% (target <5%)");
+            }
+        }
+
+        private void ResetStats()
+        {
+            _interpolatedFrames = 0;
+            _extrapolatedFrames = 0;
+            _frozenFrames = 0;
+        }
+
+        public void OnIntentSent(string intentType, Vector3 target)
+        {
+            if (_logIntents)
+            {
+                UnityEngine.Debug.Log($"[Netcode] Intent: {intentType} -> {target}");
+            }
+        }
+
+        public void OnSnapshotReceived(float serverTime, Vector3 pos, float speed)
+        {
+            if (_logSnapshots)
+            {
+                UnityEngine.Debug.Log($"[Netcode] Snapshot: t={serverTime:F2} pos={pos} speed={speed:F1}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Interface for NetworkClient to expose debug info (V4.0 Pure LoL).
+    /// </summary>
+    public interface INetcodeDebugSource
+    {
+        BasePosQuality GetBasePosQuality();
+        Vector3 GetBasePosition();
+        Vector3 GetVisualPosition();
+        float GetCurrentSpeed();
+        float GetAdaptiveBuffer();
+        bool IsImmobilized();
+        bool HasLocalMoveIntent();
+    }
+}
+
+#endif

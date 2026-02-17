@@ -1,0 +1,652 @@
+// CommandReconciliation.cs - Command-based prediction and reconciliation
+// Pattern: Command replay with tick simulation (industry standard for MOBAs)
+//
+// Key insight: Command-based doesn't eliminate replay, it changes WHAT we replay.
+// - Input-based: replay 30 inputs/sec
+// - Command-based: replay sparse commands + simulate ticks between them
+//
+// On snapshot:
+// 1. Revert to server state
+// 2. Re-apply unacked commands at their issue ticks
+// 3. Re-simulate ticks from server tick to predicted tick
+
+using System.Collections.Generic;
+using UnityEngine;
+using MOBANet.Core;
+using MOBANet.GameSim.Core;
+using MOBANet.GameSim.Entities;
+using MOBANet.GameSim.Commands;
+using MOBANet.NetAdapter.Messages;
+using MOBANet.NetAdapter.Metrics;
+using MOBANet.Shared;
+
+// Alias to avoid ambiguity with GameSim.Entities.EntityState
+using NetEntityState = MOBANet.NetAdapter.Messages.EntityState;
+
+namespace MOBANet.UnityView.Prediction
+{
+    /// <summary>
+    /// Movement state for tracking pending movement (semi-stateless reconciliation).
+    /// </summary>
+    public struct MovementState
+    {
+        /// <summary>Movement sequence number</summary>
+        public uint Sequence;
+
+        /// <summary>Is player moving?</summary>
+        public bool IsMoving;
+
+        /// <summary>Movement direction (normalized XZ)</summary>
+        public Vector2 MoveDir;
+
+        /// <summary>Client tick when this state was sent</summary>
+        public uint IssueTick;
+    }
+
+    /// <summary>
+    /// Pending command awaiting server acknowledgment.
+    /// </summary>
+    public struct PendingCommand
+    {
+        /// <summary>Command sequence number (used for ordering and ACK tracking)</summary>
+        public uint Sequence;
+
+        /// <summary>
+        /// Client tick when command was issued (DEBUG ONLY).
+        /// NOT used for replay timing - client/server clocks drift!
+        /// Replay uses Sequence order, not IssueTick timing.
+        /// </summary>
+        public uint IssueTick;
+
+        public SimCommand Command;
+    }
+
+    /// <summary>
+    /// Handles command-based prediction and reconciliation for the local player.
+    ///
+    /// Unlike pure server-authoritative (which causes input lag), this system:
+    /// 1. Applies commands locally for instant feedback
+    /// 2. Records commands with their issue tick
+    /// 3. On server snapshot: replays unacked commands and re-simulates ticks
+    ///
+    /// This maintains smooth prediction while staying synchronized with the server.
+    /// </summary>
+    public class CommandReconciliation
+    {
+        #region Fields
+
+        private readonly SimWorld _predictionWorld;
+        private readonly SimConfig _config;
+        private readonly int _localClientId;
+
+        // Pending commands buffer (commands sent but not yet acked by server)
+        private readonly List<PendingCommand> _pendingCommands = new();
+        private const int MAX_PENDING_COMMANDS = 32;
+
+        // Server state tracking
+        private uint _lastAckedSeq;
+        private uint _lastServerTick;
+        private Vector3 _lastServerPosition;
+
+        // Movement reconciliation (semi-stateless)
+        private uint _lastAckedMovementSeq;
+        private uint _lastSentMovementSeq;
+        private MovementState _lastSentMovementState;
+
+        // Metrics
+        private float _lastError;
+        private int _reconcileCount;
+        private int _replayedCommandCount;
+        private int _replayedTickCount;
+
+        // Soft correction state
+        private Vector3 _softCorrectionTarget = Vector3.zero;
+        private bool _isSoftCorrecting = false;
+        private Vector3 _visualCorrectionOffset = Vector3.zero;
+
+        // Health monitoring
+        private const float HEALTH_LOG_INTERVAL = 3f; // Log every 3 seconds
+        private float _healthLogTimer = 0f;
+        private int _snapshotCount = 0;
+        private float _totalError = 0f;
+        private float _maxError = 0f;
+        private int _softCorrectionCount = 0;
+        private int _hardCorrectionCount = 0;
+        private int _velocitySkipCount = 0;
+        private bool _lastHealthWasGood = true;
+
+        #endregion
+
+        #region Configuration
+
+        /// <summary>
+        /// Position error threshold below which we skip reconciliation.
+        /// Small errors from float precision don't need correction.
+        /// </summary>
+        public float ReconcileThreshold { get; set; } = NetcodeConstants.SOFT_RECONCILE_THRESHOLD;
+
+        /// <summary>
+        /// Maximum ticks to replay in a single reconciliation.
+        /// Beyond this, we snap brutally (desync too large to hide).
+        /// Configured in NetcodeConstants.MAX_REPLAY_TICKS.
+        /// </summary>
+        public int MaxReplayTicks { get; set; } = NetcodeConstants.MAX_REPLAY_TICKS;
+
+        #endregion
+
+        #region Properties
+
+        public uint LastAckedSequence => _lastAckedSeq;
+        public uint LastServerTick => _lastServerTick;
+        public Vector3 LastServerPosition => _lastServerPosition;
+        public float LastError => _lastError;
+        public int ReconcileCount => _reconcileCount;
+        public int PendingCommandCount => _pendingCommands.Count;
+
+        /// <summary>Last movement sequence acknowledged by server</summary>
+        public uint LastAckedMovementSeq => _lastAckedMovementSeq;
+
+        /// <summary>Last movement sequence sent to server</summary>
+        public uint LastSentMovementSeq => _lastSentMovementSeq;
+
+        /// <summary>Is there pending unacknowledged movement?</summary>
+        public bool HasPendingMovement => _lastSentMovementSeq > _lastAckedMovementSeq;
+
+        // Expose for debug UI (compatibility with old names)
+        public int HardCorrectionCount => _reconcileCount;
+        public int SoftCorrectionCount => 0; // Not used in this implementation
+
+        /// <summary>
+        /// Offset visuel de correction (appliqué dans la couche view, pas dans la sim).
+        /// Permet une convergence progressive vers la position serveur sans affecter la prédiction.
+        /// </summary>
+        public Vector3 VisualCorrectionOffset => _visualCorrectionOffset;
+
+        #endregion
+
+        #region Constructor
+
+        public CommandReconciliation(SimWorld predictionWorld, int localClientId)
+        {
+            _predictionWorld = predictionWorld;
+            _config = predictionWorld.Config;
+            _localClientId = localClientId;
+        }
+
+        #endregion
+
+        #region Command Recording
+
+        /// <summary>
+        /// Record a command that was executed locally.
+        /// Call this AFTER applying the command to the prediction world.
+        /// </summary>
+        public void RecordCommand(in SimCommand cmd, uint issueTick)
+        {
+            _pendingCommands.Add(new PendingCommand
+            {
+                Sequence = cmd.Sequence,
+                IssueTick = issueTick,
+                Command = cmd
+            });
+
+            // Prevent unbounded growth
+            while (_pendingCommands.Count > MAX_PENDING_COMMANDS)
+            {
+                _pendingCommands.RemoveAt(0);
+            }
+        }
+
+        /// <summary>
+        /// Record movement state sent to server.
+        /// Call this when sending InputPacket with movement state.
+        /// Used for movement reconciliation (semi-stateless system).
+        /// </summary>
+        public void RecordMovementState(uint seq, bool isMoving, Vector2 moveDir, uint issueTick)
+        {
+            _lastSentMovementSeq = seq;
+            _lastSentMovementState = new MovementState
+            {
+                Sequence = seq,
+                IsMoving = isMoving,
+                MoveDir = moveDir,
+                IssueTick = issueTick
+            };
+        }
+
+        #endregion
+
+        #region Snapshot Processing
+
+        /// <summary>
+        /// Process incoming snapshot - reconcile if needed.
+        /// This is the core of command-based prediction.
+        /// </summary>
+        public void OnSnapshotReceived(in SnapshotDelta snapshot)
+        {
+            // Track RTT
+            PingTracker.RecordPongReceived(snapshot.AckInputSeq);
+
+            // Track for health monitoring
+            _snapshotCount++;
+
+            _lastAckedSeq = snapshot.AckInputSeq;
+            _lastAckedMovementSeq = snapshot.AckMovementSeq;
+            _lastServerTick = snapshot.ServerTick;
+
+            // Find local player state in snapshot
+            for (int i = 0; i < snapshot.EntityCount; i++)
+            {
+                ref readonly var state = ref snapshot.Entities[i];
+
+                var entity = _predictionWorld.GetEntity(state.EntityId);
+                if (entity is SimPlayer player && player.OwnerClientId == _localClientId)
+                {
+                    ProcessLocalPlayerState(player, state, snapshot.ServerTick);
+                    break;
+                }
+            }
+
+            // Discard acknowledged commands
+            int discardedCount = _pendingCommands.RemoveAll(cmd => cmd.Sequence <= _lastAckedSeq);
+            // Debug.Log($"[CommandReconciliation] Discarded {discardedCount} acked commands (AckSeq={_lastAckedSeq}), Remaining={_pendingCommands.Count}");
+        }
+
+        private void ProcessLocalPlayerState(SimPlayer player, in NetEntityState serverState, uint serverTick)
+        {
+            _lastServerPosition = serverState.Position;
+
+            // Calculate prediction error
+            Vector3 diff = player.Transform.Position - serverState.Position;
+            float error = diff.magnitude;
+            _lastError = error;
+
+            // Track for health monitoring
+            _totalError += error;
+            if (error > _maxError) _maxError = error;
+
+            // If grounded, use horizontal error only (ignore Y gravity differences)
+            if (player.Transform.IsGrounded)
+            {
+                Vector3 horizontalDiff = new Vector3(diff.x, 0, diff.z);
+                float horizontalError = horizontalDiff.magnitude;
+
+                // If error is primarily vertical (player on ground) → ignore
+                if (horizontalError < NetcodeConstants.SOFT_RECONCILE_THRESHOLD && Mathf.Abs(diff.y) > 0.1f)
+                {
+                    _isSoftCorrecting = false;
+                    _visualCorrectionOffset = Vector3.zero;
+                    return;
+                }
+
+                // Use horizontal error when grounded
+                error = horizontalError;
+            }
+
+            // Branch 1: Erreur négligeable → RAS
+            if (error <= NetcodeConstants.SOFT_RECONCILE_THRESHOLD)
+            {
+                _isSoftCorrecting = false;
+                _visualCorrectionOffset = Vector3.zero;
+                return;
+            }
+
+            // Branch 2: Moderate error → Soft correction
+            if (error <= NetcodeConstants.HARD_RECONCILE_THRESHOLD)
+            {
+                // Start soft correction if not already in progress
+                if (!_isSoftCorrecting)
+                {
+                    _isSoftCorrecting = true;
+                    _softCorrectionCount++;
+                }
+
+                // Update target each snapshot
+                _softCorrectionTarget = serverState.Position;
+
+                // Don't override velocity if we have pending movement (semi-stateless)
+                bool hasPendingMovement = _lastSentMovementSeq > _lastAckedMovementSeq;
+                bool hasPendingMovementCmd = HasPendingMovementCommand();
+
+                if (!hasPendingMovement && !hasPendingMovementCmd)
+                {
+                    // No pending movement → align with server
+                    player.Transform.Velocity = serverState.Velocity;
+
+                    // Derive IsMoving and MoveDirection from server velocity
+                    float horizontalSpeed = new Vector2(serverState.Velocity.x, serverState.Velocity.z).magnitude;
+                    player.Transform.IsMoving = horizontalSpeed > 0.1f;
+                    if (player.Transform.IsMoving)
+                    {
+                        player.Transform.MoveDirection = new Vector3(serverState.Velocity.x, 0f, serverState.Velocity.z).normalized;
+                    }
+                    else
+                    {
+                        player.Transform.MoveDirection = Vector3.zero;
+                    }
+                }
+                else
+                {
+                    // Pending movement → keep local predicted state
+                    _velocitySkipCount++;
+                }
+
+                return;
+            }
+
+            // Branch 3: Large error → Hard reconciliation
+            _isSoftCorrecting = false;
+            _visualCorrectionOffset = Vector3.zero;
+            _hardCorrectionCount++;
+            Reconcile(player, serverState, serverTick);
+        }
+
+        /// <summary>
+        /// Core reconciliation: revert to server state, replay commands, re-simulate ticks.
+        /// </summary>
+        private void Reconcile(SimPlayer player, in NetEntityState serverState, uint serverTick)
+        {
+            uint predictedTick = _predictionWorld.Clock.CurrentTick;
+
+            // Sanity check: don't replay if server is ahead of us (shouldn't happen)
+            if (serverTick >= predictedTick)
+            {
+                // Just apply server state directly
+                ApplyServerState(player, serverState);
+                _predictionWorld.Clock.SetTick(serverTick);
+                return;
+            }
+
+            // Calculate ticks to replay
+            int ticksToReplay = (int)(predictedTick - serverTick);
+
+            // Beyond MaxReplayTicks: snap brutally, don't try to hide it
+            // This indicates serious network issues (lag spike, packet loss burst)
+            if (ticksToReplay > MaxReplayTicks)
+            {
+                // Debug.LogWarning($"[CommandReconciliation] SNAP: {ticksToReplay} ticks behind (max={MaxReplayTicks}). " +
+                //     "Network issues detected - brutal correction applied.");
+
+                // Just snap to server state, no replay
+                ApplyServerState(player, serverState);
+                _predictionWorld.Clock.SetTick(serverTick);
+
+                // Clear pending commands - they're too old to be useful
+                _pendingCommands.Clear();
+
+                // Advance clock to current predicted tick
+                _predictionWorld.Clock.SetTick(predictedTick);
+
+                _reconcileCount++;
+                return;
+            }
+
+            // 1. Apply server authoritative state (position, health, etc.)
+            ApplyServerState(player, serverState);
+            _predictionWorld.Clock.SetTick(serverTick);
+
+            // Store position after revert for logging
+            Vector3 posAfterRevert = player.Transform.Position;
+
+            // 2. Get commands to replay (sequence > last acked, ordered by SEQUENCE not tick)
+            // IMPORTANT: Don't use IssueTick for timing - client/server clocks drift!
+            var commandsToReplay = GetCommandsToReplay(serverTick);
+            _replayedCommandCount = commandsToReplay.Count;
+            _replayedTickCount = ticksToReplay;
+
+            // 3. Apply ALL unacked commands IMMEDIATELY at ServerTick
+            // Why: These commands haven't been processed by server yet (that's why they're unacked)
+            // The server will execute them in upcoming ticks, so we apply them now to predict ahead
+            // Using IssueTick would cause oscillation due to client/server clock drift
+            foreach (var pending in commandsToReplay)
+            {
+                _predictionWorld.CommandDispatcher.Execute(player, pending.Command);
+            }
+
+            // 4. RE-APPLY PENDING MOVEMENT STATE before simulating
+            // The server state may have old movement (e.g., stopped) but client is currently moving.
+            // We must restore the current input state to predict correctly.
+            if (_lastSentMovementSeq > _lastAckedMovementSeq)
+            {
+                // We have pending movement that server hasn't acknowledged yet
+                if (_lastSentMovementState.IsMoving)
+                {
+                    Vector3 dir3D = new Vector3(_lastSentMovementState.MoveDir.x, 0f, _lastSentMovementState.MoveDir.y);
+                    player.SetMoveDirection(dir3D);
+                }
+                else
+                {
+                    player.StopMoving();
+                }
+            }
+
+            // 5. Replay ticks from serverTick to predictedTick (pure physics, no commands)
+            // Commands and movement state are already applied - now we just simulate forward
+            for (int t = 0; t < ticksToReplay; t++)
+            {
+                player.Tick(_predictionWorld.Clock.TickDelta, _config);
+                _predictionWorld.Clock.Advance();
+            }
+
+            _reconcileCount++;
+        }
+
+        /// <summary>
+        /// Apply server authoritative state to player.
+        /// Velocity is replicated from snapshot - movement state is derived from it.
+        /// </summary>
+        private void ApplyServerState(SimPlayer player, in NetEntityState state)
+        {
+            player.Transform.Position = state.Position;
+            player.Transform.RotationY = state.Rotation;
+            player.Stats.Health = state.Health;
+            // IsAlive is computed from Health > 0, no need to assign
+
+            // Restore velocity from snapshot (server-authoritative)
+            // Movement state (IsMoving) is derived from velocity magnitude in SimPlayer
+            player.Transform.Velocity = state.Velocity;
+        }
+
+        /// <summary>
+        /// Get commands to replay, sorted by issue tick.
+        /// Only returns commands with sequence > lastAckedSeq.
+        /// </summary>
+        private List<PendingCommand> GetCommandsToReplay(uint fromTick)
+        {
+            var result = new List<PendingCommand>();
+
+            foreach (var cmd in _pendingCommands)
+            {
+                // Only replay unacked commands
+                if (cmd.Sequence > _lastAckedSeq)
+                {
+                    result.Add(cmd);
+                }
+            }
+
+            // Sort by sequence number (execution order, not timing)
+            // Don't use IssueTick - client/server clocks drift!
+            result.Sort((a, b) => a.Sequence.CompareTo(b.Sequence));
+
+            // DEBUG: Log commandes à rejouer (commented - replaced by MovementDebugger)
+            // Debug.Log($"[CommandReconciliation] GetCommandsToReplay: PendingTotal={_pendingCommands.Count}, LastAckedSeq={_lastAckedSeq}, ToReplay={result.Count}");
+            // if (_pendingCommands.Count > 0 && result.Count == 0)
+            // {
+            //     Debug.LogWarning($"[CommandReconciliation] ⚠️ Buffer has {_pendingCommands.Count} cmds but 0 to replay! First cmd seq={_pendingCommands[0].Sequence}, LastAckedSeq={_lastAckedSeq}");
+            // }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Remove commands that have been acknowledged by the server.
+        /// </summary>
+        private void DiscardAckedCommands()
+        {
+            _pendingCommands.RemoveAll(cmd => cmd.Sequence <= _lastAckedSeq);
+        }
+
+        #endregion
+
+        #region Utility
+
+        /// <summary>
+        /// Get the local player from prediction world.
+        /// </summary>
+        public SimPlayer GetLocalPlayer()
+        {
+            return _predictionWorld.GetPlayerByClient(_localClientId);
+        }
+
+        /// <summary>
+        /// Reset reconciliation state.
+        /// </summary>
+        public void Reset()
+        {
+            _pendingCommands.Clear();
+            _lastAckedSeq = 0;
+            _lastAckedMovementSeq = 0;
+            _lastSentMovementSeq = 0;
+            _lastSentMovementState = default;
+            _lastServerTick = 0;
+            _lastServerPosition = Vector3.zero;
+            _lastError = 0f;
+            _reconcileCount = 0;
+        }
+
+        /// <summary>
+        /// Debug info string.
+        /// </summary>
+        public string GetDebugInfo()
+        {
+            return $"CmdRecon: Pending={_pendingCommands.Count} Error={_lastError:F3} Reconciles={_reconcileCount}";
+        }
+
+        /// <summary>
+        /// Check if there are pending movement commands not yet acknowledged by server.
+        /// Used to prevent soft correction from overwriting local predicted movement state.
+        /// </summary>
+        private bool HasPendingMovementCommand()
+        {
+            foreach (var pending in _pendingCommands)
+            {
+                if (pending.Sequence > _lastAckedSeq && pending.Command.IsMovement)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        #endregion
+
+        #region Continuous Correction (Optional)
+
+        /// <summary>
+        /// Applique une correction progressive (soft correction) vers la position serveur.
+        /// L'offset est stocké séparément et appliqué dans la couche visuelle (NetPlayerController).
+        /// Cela évite de modifier directement player.Transform.Position (qui casserait la prédiction).
+        /// </summary>
+        public void UpdateCorrection(float deltaTime)
+        {
+            if (!_isSoftCorrecting) return;
+
+            var player = GetLocalPlayer();
+            if (player == null)
+            {
+                _isSoftCorrecting = false;
+                return;
+            }
+
+            // Calculer l'offset entre position sim et cible serveur
+            Vector3 targetOffset = _softCorrectionTarget - player.Transform.Position;
+
+            // Apply exponential correction on OFFSET (framerate-independent)
+            _visualCorrectionOffset = Vector3.Lerp(
+                _visualCorrectionOffset,
+                targetOffset,
+                1f - Mathf.Exp(-NetcodeConstants.POSITION_SMOOTHING_K * deltaTime)
+            );
+
+            // Check if correction is complete (converged)
+            if (_visualCorrectionOffset.magnitude < 0.01f) // 1cm
+            {
+                _isSoftCorrecting = false;
+                _visualCorrectionOffset = Vector3.zero;
+            }
+        }
+
+        #endregion
+
+        #region Health Monitoring
+
+        /// <summary>
+        /// Update health monitor - call every FixedUpdate.
+        /// Logs periodic health summary for prediction/reconciliation system.
+        /// </summary>
+        public void UpdateHealthMonitor(float deltaTime)
+        {
+            _healthLogTimer += deltaTime;
+
+            if (_healthLogTimer < HEALTH_LOG_INTERVAL) return;
+            _healthLogTimer = 0f;
+
+            // Skip if no snapshots received
+            if (_snapshotCount == 0) return;
+
+            // Calculate metrics
+            float avgError = _totalError / _snapshotCount;
+            bool isHealthy = avgError < NetcodeConstants.SOFT_RECONCILE_THRESHOLD &&
+                             _hardCorrectionCount == 0;
+
+            // Build status indicator
+            string status;
+            if (isHealthy)
+            {
+                status = "OK";
+            }
+            else if (_hardCorrectionCount > 0)
+            {
+                status = "HARD_CORRECTIONS";
+            }
+            else if (avgError > NetcodeConstants.HARD_RECONCILE_THRESHOLD)
+            {
+                status = "HIGH_ERROR";
+            }
+            else
+            {
+                status = "SOFT_CORRECTIONS";
+            }
+
+            // Log health summary
+            Debug.Log($"[RECONCILIATION HEALTH] {status} | " +
+                $"avgErr={avgError:F3}m | maxErr={_maxError:F3}m | " +
+                $"soft={_softCorrectionCount} | hard={_hardCorrectionCount} | " +
+                $"velSkip={_velocitySkipCount} | snapshots={_snapshotCount}");
+
+            // Log warning if health degraded
+            if (!isHealthy && _lastHealthWasGood)
+            {
+                Debug.LogWarning($"[RECONCILIATION HEALTH] Health degraded: " +
+                    $"avgErr={avgError:F3}m, hard={_hardCorrectionCount}");
+            }
+
+            _lastHealthWasGood = isHealthy;
+
+            // Reset metrics for next period
+            ResetHealthMetrics();
+        }
+
+        private void ResetHealthMetrics()
+        {
+            _snapshotCount = 0;
+            _totalError = 0f;
+            _maxError = 0f;
+            _softCorrectionCount = 0;
+            _hardCorrectionCount = 0;
+            _velocitySkipCount = 0;
+        }
+
+        #endregion
+    }
+}

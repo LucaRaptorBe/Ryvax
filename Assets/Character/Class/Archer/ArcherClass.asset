@@ -1,0 +1,22 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 72ff8ac70934f4f51a527b50e33fdadd, type: 3}
+  m_Name: ArcherClass
+  m_EditorClassIdentifier: 
+  className: Archer
+  classIcon: {fileID: 0}
+  classType: 1
+  passive: {fileID: 11400000, guid: cae00fe8180a04a29b3d28fdffacf142, type: 2}
+  ability1: {fileID: 11400000, guid: f2aca94da88e640648f2b14df4f60058, type: 2}
+  ability2: {fileID: 11400000, guid: a847001ba0fec49b3b1e9edcaf64ca3c, type: 2}
+  ability3: {fileID: 11400000, guid: 5d5d34456ff4849f29b33ff12b88cfd5, type: 2}
+  ability4: {fileID: 11400000, guid: 5b188391755e74625a3229dc52888ed2, type: 2}

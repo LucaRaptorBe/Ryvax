@@ -105,7 +105,9 @@ namespace FishNet.Component.Prediction
                 #if UNITY_6000_1_OR_NEWER
                 IsKinematic = rb.bodyType == RigidbodyType2D.Kinematic;
                 #else
+                #pragma warning disable CS0618 // isKinematic is obsolete
                 IsKinematic = rb.isKinematic;
+                #pragma warning restore CS0618
                 #endif
                 CollisionDetectionMode = rb.collisionDetectionMode;
             }
@@ -123,7 +125,9 @@ namespace FishNet.Component.Prediction
                 #if UNITY_6000_1_OR_NEWER
                 IsKinematic = rb.bodyType == RigidbodyType2D.Kinematic;
                 #else
+                #pragma warning disable CS0618 // isKinematic is obsolete
                 IsKinematic = rb.isKinematic;
+                #pragma warning restore CS0618
                 #endif
                 CollisionDetectionMode = rb.collisionDetectionMode;
             }
@@ -356,7 +360,9 @@ namespace FishNet.Component.Prediction
                     #if UNITY_6000_1_OR_NEWER
                     rb.bodyType = RigidbodyType2D.Kinematic;
                     #else
+                    #pragma warning disable CS0618 // isKinematic is obsolete
                     rb.isKinematic = true;
+                    #pragma warning restore CS0618
                     #endif
 
                     rb.simulated = false;
@@ -445,7 +451,9 @@ namespace FishNet.Component.Prediction
                     #if UNITY_6000_1_OR_NEWER
                     rb.bodyType = RigidbodyType2D.Dynamic;
                     #else
+                    #pragma warning disable CS0618 // isKinematic is obsolete
                     rb.isKinematic = false;
+                    #pragma warning restore CS0618
                     #endif
 
                     rb.simulated = true;

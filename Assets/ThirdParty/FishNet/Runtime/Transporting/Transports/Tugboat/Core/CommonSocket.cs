@@ -77,6 +77,21 @@ namespace FishNet.Transporting.Tugboat
 
             // ConnectionId isn't used from client to server.
             Packet outgoing = new(connectionId, segment, channelId, mtu);
+
+            // METRIC: Log when packet is enqueued to transport queue
+            int queueCountBefore = queue.Count;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            // METRIC: Log segment signature to trace packets through transport layers
+            ulong signature = 0;
+            if (segment.Count >= 8)
+            {
+                signature = System.BitConverter.ToUInt64(segment.Array, segment.Offset);
+            }
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [POINT 4 COMMON] frame={UnityEngine.Time.frameCount} queueBefore={queueCountBefore} size={segment.Count} sig={signature:X16}");
+#else
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [COMMON SOCKET SEND] Enqueue frame={UnityEngine.Time.frameCount} queueBefore={queueCountBefore} size={segment.Count}");
+#endif
+
             queue.Enqueue(outgoing);
         }
 

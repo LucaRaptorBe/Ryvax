@@ -74,10 +74,11 @@ namespace MOBANet.GameSim.States
             ChargeRecoveryTime = new float[SLOT_COUNT];
             CurrentCast = new CastState();
 
-            // Default: 1 charge per ability
+            // Default: 1 charge per ability, all abilities learned at level 1
             for (int i = 0; i < SLOT_COUNT; i++)
             {
                 Charges[i] = 1;
+                Levels[i] = 1;
             }
         }
 

@@ -614,8 +614,17 @@ namespace FishNet.Managing.Transporting
         /// <param name = "channelId">Channel to send on.</param>
         /// <param name = "segment">Data to send.</param>
         /// <param name = "splitLargeMessages">True to split large packets which exceed MTU and send them in order on the reliable channel.</param>
-        internal void SendToServer(byte channelId, ArraySegment<byte> segment, bool splitLargeMessages = true, DataOrderType orderType = DataOrderType.Default)
+        public void SendToServer(byte channelId, ArraySegment<byte> segment, bool splitLargeMessages = true, DataOrderType orderType = DataOrderType.Default)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            // METRIC: Log segment signature to trace packets through transport layers
+            ulong signature = 0;
+            if (segment.Count >= 8)
+            {
+                signature = System.BitConverter.ToUInt64(segment.Array, segment.Offset);
+            }
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [POINT 2 TRANSPORT] frame={UnityEngine.Time.frameCount} size={segment.Count} sig={signature:X16}");
+#endif
             SetSplitValues(channelId, segment, splitLargeMessages, out int requiredMessages, out int maxSplitMessageSize);
             SendToServer(channelId, segment, requiredMessages, maxSplitMessageSize, orderType);
         }
@@ -755,7 +764,7 @@ namespace FishNet.Managing.Transporting
         /// Processes data to be sent by the socket.
         /// </summary>
         /// <param name = "asServer">True to send data from the local server to clients, false to send from the local client to server.
-        internal void IterateOutgoing(bool asServer)
+        public void IterateOutgoing(bool asServer)
         {
             if (asServer && _networkManager.ServerManager.AreAllServersStopped())
                 return;
@@ -886,7 +895,18 @@ namespace FishNet.Managing.Transporting
                                         _latencySimulator.AddOutgoing(channel, segment);
                                     else
 #endif
+                                    {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                                        // METRIC: Log just before ACTUAL transport call (after bundling/intermediate)
+                                        ulong signature = 0;
+                                        if (segment.Count >= 8)
+                                        {
+                                            signature = System.BitConverter.ToUInt64(segment.Array, segment.Offset);
+                                        }
+                                        // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [POINT 2B ACTUAL SEND] frame={UnityEngine.Time.frameCount} size={segment.Count} sig={signature:X16} hasIntermediate={HasIntermediateLayer}");
+#endif
                                         Transport.SendToServer(channel, segment);
+                                    }
                                     sentBytes += (ulong)segment.Count;
                                 }
                             }

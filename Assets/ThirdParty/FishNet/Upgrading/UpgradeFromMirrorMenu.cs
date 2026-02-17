@@ -41,7 +41,9 @@ namespace FishNet.Upgrading.Mirror.Editing
         [MenuItem("Tools/Fish-Networking/Utility/Upgrading/From Mirror/Remove Defines", false, 2)]
         private static void RemoveDefines()
         {
+#pragma warning disable CS0618 // GetScriptingDefineSymbolsForGroup is obsolete
             string currentDefines = PlayerSettings.GetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup);
+#pragma warning restore CS0618
             /* Convert current defines into a hashset. This is so we can
              * determine if any of our defines were added. Only save playersettings
              * when a define is added. */
@@ -63,7 +65,9 @@ namespace FishNet.Upgrading.Mirror.Editing
             {
                 Debug.Log("Removed Mirror defines to player settings.");
                 string changedDefines = string.Join(";", definesHs);
+#pragma warning disable CS0618 // SetScriptingDefineSymbolsForGroup is obsolete
                 PlayerSettings.SetScriptingDefineSymbolsForGroup(EditorUserBuildSettings.selectedBuildTargetGroup, changedDefines);
+#pragma warning restore CS0618
             }
         }
     }

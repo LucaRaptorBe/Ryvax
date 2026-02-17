@@ -33,8 +33,10 @@ namespace FishNet.Demo.Benchmarks.NetworkTransforms
         [Range(0f, 5f)]
         [SerializeField]
         private float _delayBetweenMovements = 1.5f;
+#pragma warning disable CS0414 // Field is assigned but never used
         [SerializeField]
         private float _yOffsetPerInstance = 0f;
+#pragma warning restore CS0414
         [SerializeField]
         private bool _randomMovement = true;
         [SerializeField]

@@ -54,9 +54,10 @@ namespace MOBANet.GameSim.Entities
         public int OwnerClientId { get; }
 
         /// <summary>
-        /// Champion ID (0=Mage, 1=Warrior, etc.)
+        /// Class ID (1=Archer, 2=Mage, 3=Fighter, etc.)
+        /// Maps to CharacterClass enum in animation system.
         /// </summary>
-        public int ChampionId { get; set; }
+        public int ClassId { get; set; }
 
         #endregion
 

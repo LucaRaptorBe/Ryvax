@@ -65,7 +65,9 @@ namespace FishNet.Component.Prediction
             #if UNITY_6000_1_OR_NEWER
             IsKinematic = rb.bodyType == RigidbodyType2D.Kinematic;
             #else
+            #pragma warning disable CS0618 // isKinematic is obsolete
             IsKinematic = rb.isKinematic;
+            #pragma warning restore CS0618
             #endif
         }
     }
@@ -210,7 +212,9 @@ namespace FishNet.Component.Prediction
             #if UNITY_6000_1_OR_NEWER
             rb.bodyType = state.IsKinematic ? RigidbodyType2D.Kinematic : RigidbodyType2D.Dynamic;
             #else
+            #pragma warning disable CS0618 // isKinematic is obsolete
             rb.isKinematic = state.IsKinematic;
+            #pragma warning restore CS0618
             #endif
             if (!state.IsKinematic)
             {

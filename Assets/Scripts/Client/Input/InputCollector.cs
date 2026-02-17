@@ -56,9 +56,6 @@ namespace MOBANet.UnityView.Input
         // V3.0: Click-to-move target for intent feedback
         private Vector3 _lastClickTarget;
 
-        // Event commands sequence
-        private uint _commandSequence;
-
         // Debug: track movement state transitions
         private bool _wasMovingLastFrame;
 
@@ -73,11 +70,6 @@ namespace MOBANet.UnityView.Input
         /// Current move direction (normalized). Only valid when IsMoving is true.
         /// </summary>
         public Vector2 MoveDirection => _currentMoveInput;
-
-        /// <summary>
-        /// Current command sequence number (for event commands).
-        /// </summary>
-        public uint CommandSequence => _commandSequence;
 
         /// <summary>
         /// Current intent sequence number.
@@ -273,7 +265,7 @@ namespace MOBANet.UnityView.Input
             const float JUMP_HEIGHT = 1.5f;
             float jumpVelocity = Mathf.Sqrt(2f * Mathf.Abs(GRAVITY) * JUMP_HEIGHT);
 
-            var cmd = GameCommand.Launch(++_commandSequence, Vector3.up * jumpVelocity);
+            var cmd = GameCommand.Launch(0, Vector3.up * jumpVelocity);
             _networkClient.SendEventCommand(cmd);
         }
 
@@ -297,7 +289,7 @@ namespace MOBANet.UnityView.Input
         private void CastAbility(byte slot)
         {
             Vector3 targetPos = GetMouseWorldPosition();
-            var cmd = GameCommand.CastAbility(++_commandSequence, slot, targetPos);
+            var cmd = GameCommand.CastAbility(0, slot, targetPos);
             _networkClient.SendEventCommand(cmd);
         }
 

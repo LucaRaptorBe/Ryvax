@@ -126,6 +126,20 @@ namespace FishNet.Managing.Client
             }
 #endif
 
+            // METRIC: Log just before SendToServer to verify frame timing
+            ushort broadcastKey = BroadcastExtensions.GetKey<T>();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            // Compute signature (first 8 bytes) for correlation
+            ulong signature = 0;
+            if (segment.Count >= 8)
+            {
+                signature = System.BitConverter.ToUInt64(segment.Array, segment.Offset);
+            }
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [POINT 1 BROADCAST] frame={UnityEngine.Time.frameCount} key={broadcastKey} size={segment.Count} sig={signature:X16}");
+#else
+            // UnityEngine.Debug.Log($"[{UnityEngine.Time.time:F3}] [BROADCAST LINE 129] frame={UnityEngine.Time.frameCount} seq={broadcastKey} thread={System.Threading.Thread.CurrentThread.ManagedThreadId}");
+#endif
+
             NetworkManager.TransportManager.SendToServer((byte)channel, segment);
             writer.Store();
         }
