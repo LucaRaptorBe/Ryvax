@@ -75,6 +75,21 @@ namespace MOBANet.GameSim.Core
         /// </summary>
         public float ProjectileRadius { get; set; } = 0.25f;
 
+        /// <summary>
+        /// Piercing Shot (Archer Q) cooldown in seconds
+        /// </summary>
+        public float PiercingShotCooldown { get; set; } = 6f;
+
+        /// <summary>
+        /// Piercing Shot (Archer Q) damage
+        /// </summary>
+        public float PiercingShotDamage { get; set; } = 30f;
+
+        /// <summary>
+        /// Piercing Shot (Archer Q) max range in units
+        /// </summary>
+        public float PiercingShotRange { get; set; } = 16f;
+
         #endregion
 
         #region Arena
@@ -139,12 +154,12 @@ namespace MOBANet.GameSim.Core
         /// <summary>
         /// Angle threshold before turn slowdown kicks in (degrees)
         /// </summary>
-        public float TurnSlowdownAngle { get; set; } = 90f;
+        public float TurnSlowdownAngle { get; set; } = 120f;
 
         /// <summary>
-        /// Speed multiplier at 180° turn (0.2 = 20% speed)
+        /// Speed multiplier at 180° turn (0.6 = 60% speed)
         /// </summary>
-        public float TurnSlowdownMultiplier { get; set; } = 0.2f;
+        public float TurnSlowdownMultiplier { get; set; } = 0.6f;
 
         #endregion
 
@@ -220,6 +235,9 @@ namespace MOBANet.GameSim.Core
                 ProjectileSpeed = this.ProjectileSpeed,
                 ProjectileLifetime = this.ProjectileLifetime,
                 ProjectileRadius = this.ProjectileRadius,
+                PiercingShotCooldown = this.PiercingShotCooldown,
+                PiercingShotDamage = this.PiercingShotDamage,
+                PiercingShotRange = this.PiercingShotRange,
 
                 // Arena
                 ArenaWidth = this.ArenaWidth,
