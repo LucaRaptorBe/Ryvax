@@ -1,6 +1,6 @@
 # System Overview
 
-**High-Level Architecture for Ryvax Netcode**
+**High-Level Architecture for Ryvax Netcode (V5.0)**
 
 This document provides a bird's-eye view of the complete multiplayer architecture, showing how components interact from input to rendering.
 
@@ -10,74 +10,73 @@ This document provides a bird's-eye view of the complete multiplayer architectur
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                              CLIENT (Unity)                               │
+│                              CLIENT (Unity)                              │
 ├──────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
+│                                                                          │
 │  ┌────────────────┐    ┌─────────────────┐    ┌──────────────────┐      │
-│  │ InputCollector │───▶│  IntentBuilder  │───▶│ NetworkClient    │      │
-│  │ (WASD/Click)   │    │   (120Hz)       │    │  (120Hz send)    │      │
+│  │ InputCollector  │───▶│  IntentBuilder   │───▶│  NetworkClient   │     │
+│  │ (WASD/Click)    │    │  (rate-limit)    │    │  (120Hz send)    │     │
 │  └────────────────┘    └─────────────────┘    └────────┬─────────┘      │
-│         │                                               │                │
-│         └─► Local Intent (rotation/animation feedback)  │                │
 │                                                         │                │
-│                                                    ┌────▼─────────┐      │
-│                                                    │ FishNetAdapter│     │
-│                                                    │  (UDP send)   │     │
-│                                                    └────────┬──────┘      │
-│                                                             │             │
-└─────────────────────────────────────────────────────────────┼─────────────┘
+│                                                    ┌────▼──────────┐     │
+│                                                    │ FishNetAdapter │    │
+│                                                    │  (UDP send)    │    │
+│                                                    └────────┬───────┘    │
+│                                                             │            │
+└─────────────────────────────────────────────────────────────┼────────────┘
                                                               │
-                                    InputPacket (14 bytes)   │
-                                    MovementSeq, Intent      │
+                                    InputPacket (14b header)  │
+                                    MovementSeq, Intent       │
                                                               ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                                 SERVER                                    │
+│                                 SERVER                                   │
 ├──────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
+│                                                                          │
 │  ┌────────────────┐    ┌─────────────────┐    ┌──────────────────┐      │
-│  │ FishNetAdapter │───▶│ InputBuffer     │───▶│ ServerGameLoop   │      │
-│  │  (UDP recv)    │    │  (queue)        │    │   (60Hz tick)    │      │
-│  └────────────────┘    └─────────────────┘    └────────┬─────────┘      │
-│                                                         │                │
-│                                                    ┌────▼─────────┐      │
-│                                                    │   SimWorld   │      │
-│                                                    │  (GameSim)   │      │
-│                                                    └────────┬──────┘      │
-│                                                             │             │
-│         ┌───────────────────────────────────────────────────┘             │
-│         │                                                                 │
-│    ┌────▼─────────┐         ┌──────────────────┐                         │
-│    │ AOIManager   │────────▶│ SnapshotBroadcast│                         │
-│    │ (culling)    │         │    (60Hz)        │                         │
-│    └──────────────┘         └────────┬─────────┘                         │
+│  │ FishNetAdapter  │───▶│ InputBuffer     │───▶│ ServerGameLoop   │     │
+│  │  (UDP recv)     │    │ (ConcurrentQueue│    │  (FixedUpdate)   │     │
+│  └────────────────┘    │  last-input-wins)│    └────────┬─────────┘     │
+│                         └─────────────────┘             │                │
+│                                                    ┌────▼─────────┐     │
+│                                                    │   SimWorld    │     │
+│                                                    │   .Step()     │     │
+│                                                    └────────┬──────┘     │
+│                                                             │            │
+│         ┌───────────────────────────────────────────────────┘            │
+│         │                                                                │
+│    ┌────▼─────────┐         ┌──────────────────┐                        │
+│    │ AOIManager    │────────▶│ BroadcastSnapshot│                       │
+│    │ (culling)     │         │  (60Hz default)  │                       │
+│    └──────────────┘         └────────┬─────────┘                        │
 │                                      │                                   │
 └──────────────────────────────────────┼───────────────────────────────────┘
                                        │
-                        SnapshotDelta (40+ bytes)
-                        ServerTick, Entities[]
+                        SnapshotDelta (14b header + 30b/entity)
+                        ServerTick, EntityState[]
                                        ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                          CLIENT (Receive & Render)                        │
+│                          CLIENT (Receive & Render)                       │
 ├──────────────────────────────────────────────────────────────────────────┤
-│                                                                           │
-│  ┌────────────────┐    ┌─────────────────┐    ┌──────────────────┐      │
-│  │ NetworkClient  │───▶│  TimeSync       │───▶│BaseInterpolator  │      │
-│  │OnSnapshotRecv  │    │ (buffer ~100ms) │    │  (lerp snaps)    │      │
-│  └────────────────┘    └─────────────────┘    └────────┬─────────┘      │
-│                                                         │                │
-│                                                    ┌────▼─────────┐      │
-│                                                    │VisualPosition│      │
-│                                                    │   Manager    │      │
-│                                                    └────────┬──────┘      │
-│                                                             │             │
-│                                                    visualPos = basePos    │
-│                                                          +  offset        │
-│                                                             │             │
-│                                                    ┌────────▼──────┐      │
-│                                                    │  PlayerView   │      │
-│                                                    │ transform.pos │      │
-│                                                    └───────────────┘      │
-│                                                                           │
+│                                                                          │
+│  ┌────────────────┐    ┌──────────────────────────────────────────┐     │
+│  │ NetworkClient   │───▶│         EntityView (base class)         │     │
+│  │OnSnapshotRecv   │    │                                         │     │
+│  └────────────────┘    │  OnSnapshotReceived(pos, vel, rotY)      │     │
+│                         │    → store server state                  │     │
+│                         │                                         │     │
+│                         │  UpdatePosition() [every frame]         │     │
+│                         │    → deadReckonedPos = serverPos         │     │
+│                         │                       + serverVel * dt   │     │
+│                         │    → if stopped: snap to deadReckonedPos │     │
+│                         │    → if moving:  lerp toward it          │     │
+│                         │    → transform.position = visualPos      │     │
+│                         └─────────────────┬───────────────────────┘     │
+│                                           │                              │
+│                                  ┌────────▼──────────┐                  │
+│                                  │    PlayerView      │                  │
+│                                  │ (class, anims, HP) │                  │
+│                                  └───────────────────┘                  │
+│                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -90,20 +89,25 @@ This document provides a bird's-eye view of the complete multiplayer architectur
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| InputCollector | `Assets/Scripts/Client/Input/InputCollector.cs:94` | Reads keyboard/mouse input each frame |
-| IntentBuilder | `Assets/Scripts/Client/Input/IntentBuilder.cs` | Converts raw input to intents (MoveDir/MoveTo/Stop) at 120Hz |
-| NetworkClient | `Assets/Scripts/Core/NetworkClient.cs:256` | Queues and sends InputPackets |
+| InputCollector | `Scripts/Client/Input/InputCollector.cs` | Reads WASD/mouse, routes to IntentBuilder or CastController |
+| IntentBuilder | `Scripts/Client/Input/IntentBuilder.cs` | Rate-limits intents (120Hz for WASD), creates InputIntent |
+| InputIntent | `Scripts/Client/Input/InputIntent.cs` | Value type: MoveDir, MoveTo, Stop, Follow |
+| InputBuffer | `Scripts/Client/Input/InputBuffer.cs` | Ring buffer for event commands (UDP redundancy) |
+| NetworkClient | `Scripts/Core/NetworkClient.cs` | Queues intents, sends InputPackets at 120Hz |
 
 **Key Flow:**
 ```
-WASD press → InputCollector.HandleWASDInput() → IntentBuilder.OnKeyboardMove()
-→ NetworkClient.SendInputIntent() → FishNetAdapter.SendInputPacket()
+WASD press → InputCollector → IntentBuilder.OnKeyboardMove()
+  → InputIntent.MoveDir (rate-limited 120Hz)
+  → NetworkClient.SendInputIntent(intent)
+  → SendInputUpdate() builds InputPacket
+  → FishNetAdapter.SendInputPacket() [UDP unreliable]
 ```
 
-**Local Feedback:**
-- Rotation: Immediate turn toward input direction (PlayerView.cs:158-169)
-- Animation: Instant "run" animation start (PlayerView.cs:203-214)
-- Position: NO local prediction (server-authoritative)
+**Local Feedback (V5.0):**
+- Rotation: driven by server snapshot (no local prediction)
+- Animation: derived from server velocity in `EntityView.UpdateAnimation()`
+- Position: NO local prediction (server-authoritative, dead-reckoned between snapshots)
 
 ---
 
@@ -112,48 +116,89 @@ WASD press → InputCollector.HandleWASDInput() → IntentBuilder.OnKeyboardMove
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| FishNetAdapter | `Assets/Scripts/Network/NetAdapter/FishNet/FishNetAdapter.cs` | Bridges GameSim ↔ FishNet transport |
-| InputPacket | `Assets/Scripts/Network/NetAdapter/Messages/InputPacket.cs` | Input message format (14 bytes) |
-| SnapshotDelta | `Assets/Scripts/Network/NetAdapter/Messages/SnapshotDelta.cs` | Snapshot message format (40+ bytes) |
-| GameCommand | `Assets/Scripts/Network/NetAdapter/Messages/GameCommand.cs` | Event messages (Jump, CastAbility, etc.) |
+| FishNetAdapter | `Scripts/Network/NetAdapter/FishNet/FishNetAdapter.cs` | Only file importing FishNet; wraps NetworkManager behind INetAdapter |
+| InputPacket | `Scripts/Network/NetAdapter/Messages/InputPacket.cs` | Client→Server: intent + event commands |
+| SnapshotDelta | `Scripts/Network/NetAdapter/Messages/SnapshotDelta.cs` | Server→Client: entity states (unreliable) |
+| ReliableEvent | `Scripts/Network/NetAdapter/Messages/ReliableEvent.cs` | Server→Client: lifecycle events (reliable) |
+| GameCommand | `Scripts/Network/NetAdapter/Messages/GameCommand.cs` | Client→Server: class select, ability cast, ping |
+| MatchConfigBroadcast | `Scripts/Network/NetAdapter/Messages/MatchConfigBroadcast.cs` | Server→Client: match configuration (reliable, sent on connect) |
 
-**Message Formats:**
-
-**InputPacket (14 bytes):**
+**InputPacket (14 bytes header + variable events):**
 ```
 ClientTick (4) | MovementSeq (4) | IntentType (1) | Payload0 (2) | Payload1 (2) | CommandCount (1)
++ GameCommand[] (redundancy buffer for UDP reliability)
 ```
 
-**SnapshotDelta (40+ bytes for 1 entity):**
+**SnapshotDelta (14 bytes header + 30 bytes/entity):**
 ```
-ServerTick (4) | AckInputSeq (4) | AckMovementSeq (4) | EntityCount (2) | Entities[] (26+ each)
+Header: ServerTick (4) | AckInputSeq (4) | AckMovementSeq (4) | EntityCount (2)
+Per entity (30 bytes):
+  EntityId (4) | EntityType (1) | Flags (1)
+  PosX/Y/Z (6, 16-bit quantized) | RotY (2)
+  Health (2) | State (1)
+  VelX/Y/Z (6, 16-bit quantized) | SpeedQ (2)
+  EventFlags (1) | Cd0-Cd3 (4)
 ```
+
+**ReliableEvent types (TCP-equivalent):**
+- `EntitySpawn`, `EntityDeath`, `EntityRespawn`, `EntityDespawn`
+- `EntityEnterAOI`, `EntityLeaveAOI`
+- `ClassAssign`, `AbilityUsed`, `DamageDealt`
+- `Ping` (RTT measurement)
 
 ---
 
 ### 3. GameSim Layer (Simulation)
-**Purpose:** Deterministic, authoritative game simulation (server-side)
+**Purpose:** Authoritative game simulation (server-side primary, client-side for local state tracking)
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| SimWorld | `Assets/GameSim/Core/SimWorld.cs` | Simulation container, tick management |
-| SimPlayer | `Assets/GameSim/Entities/SimPlayer.cs` | Player entity with movement/stats |
-| CommandDispatcher | `Assets/GameSim/Commands/CommandDispatcher.cs` | Routes commands to handlers |
-| MovementHandler | `Assets/GameSim/Commands/Handlers/MovementHandler.cs:14` | Applies movement intents to entities |
-| TransformState | `Assets/GameSim/States/TransformState.cs` | Position/rotation component |
-| StatsState | `Assets/GameSim/States/StatsState.cs` | Health/speed/status component |
+| SimWorld | `GameSim/Core/SimWorld.cs` | Entity storage, `Step()` loop, `ExecuteCommand()` |
+| SimConfig | `GameSim/Core/SimConfig.cs` | All gameplay constants (speed, HP, cooldowns, physics) |
+| TickClock | `GameSim/Core/TickClock.cs` | Tick accumulator + timing |
+| MovementEngine | `GameSim/Core/MovementEngine.cs` | Movement math (shared) |
+| CommandDispatcher | `GameSim/Commands/CommandDispatcher.cs` | Routes SimCommand to ICommandHandler |
+| MovementHandler | `GameSim/Commands/Handlers/MovementHandler.cs` | Applies MoveDir/MoveTo/Stop/Follow |
+| AbilityHandler | `GameSim/Commands/Handlers/AbilityHandler.cs` | ICommandHandler: cast validation, SimProjectile spawn, raises AbilityUsed SimEvent |
+| SystemHandler | `GameSim/Commands/Handlers/SystemHandler.cs` | ICommandHandler: ClassSelect, raises ClassAssign SimEvent |
+| SimPlayer | `GameSim/Entities/SimPlayer.cs` | Player entity with component states |
+| SimProjectile | `GameSim/Entities/SimProjectile.cs` | Server-only projectile (NOT a SimEntity — not in entity dict, not in snapshots). Clients get cosmetic visuals via AbilityUsed event |
+
+**SimPlayer State Architecture (component model):**
+```
+SimPlayer : SimEntity
+├── TransformState Transform    — Position, Velocity, RotationY, IsGrounded, MoveDirection
+├── StatsState Stats            — Health, MaxHealth, Level, MoveSpeedModifier
+├── AbilityState Abilities      — Cooldowns[6], Levels[6], Charges[6], CastState
+└── CombatState Combat          — AttackTargetId, IsAutoAttacking, AttackCooldown, AttackSpeed, AttackRange, BaseDamage, IsAttackMoving, TimeSinceLastAttack
+```
 
 **Tick Flow:**
-```
-ServerGameLoop.FixedUpdate() → SimWorld.Tick(deltaTime)
-→ CommandDispatcher.ProcessCommands() → MovementHandler.Execute()
-→ SimPlayer.Transform.Position updated
+```csharp
+// ServerGameLoop.cs:286
+void RunSimulation()
+{
+    int ticksToRun = _simWorld.Clock.Accumulate(Time.fixedDeltaTime);
+    for (int i = 0; i < ticksToRun; i++)
+    {
+        DrainInputQueueForTick(currentTick);      // Drain ConcurrentQueue → per-client map
+        FlushPendingMovementInputs(currentTick);   // Apply last-input-wins per client
+        _simWorld.Step();                           // Physics, entities, projectiles, collisions
+        DrainAndBroadcastSimEvents();              // SimEvent → ReliableEvent (DamageDealt, EntityDeath)
+    }
+}
+
+// OnCommandReceived: Ability/System commands
+var simCmd = CommandHelper.ToSimCommand(cmd, serverTick);
+_simWorld.ExecuteCommand(clientId, simCmd);          // Handler raises SimEvents
+DrainAndBroadcastSimEvents();                        // SimEvent → ReliableEvent (AbilityUsed, ClassAssign)
+
 ```
 
 **Key Properties:**
-- **Deterministic:** Same inputs → same outputs (fixed timestep)
-- **Minimal Unity coupling:** Uses UnityEngine for Vector3/Mathf only, no MonoBehaviour
-- **Server-authoritative:** Only the server runs full simulation
+- **Pure C# class** (not MonoBehaviour) — uses `UnityEngine` only for `Vector3`/`Mathf`
+- **Server-authoritative:** Only the server runs the full simulation
+- **Client holds a SimWorld** too, for local state tracking (cooldowns, health display)
 
 ---
 
@@ -162,79 +207,98 @@ ServerGameLoop.FixedUpdate() → SimWorld.Tick(deltaTime)
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| ServerGameLoop | `Assets/Scripts/Server/ServerGameLoop.cs:909` | Main server tick loop (60Hz) |
-| AOIManager | `Assets/Scripts/Server/AOI/AOIManager.cs` | Area of Interest culling |
-| SpatialHash | `Assets/Scripts/Server/AOI/SpatialHash.cs` | Spatial partitioning for visibility |
+| ServerGameLoop | `Scripts/Server/ServerGameLoop.cs` | Main server loop (FixedUpdate) |
+| AOIManager | `Scripts/Network/NetAdapter/AOI/AOIManager.cs` | Per-client visibility sets, enter/leave events |
+| SpatialHashGrid | `Scripts/Network/NetAdapter/AOI/SpatialHashGrid.cs` | Spatial partitioning for O(1) visibility queries |
+| ServerCommandBuffer | `Scripts/Network/NetAdapter/Buffers/ServerCommandBuffer.cs` | Command ack tracking per client |
 
-**Input Buffering:**
-Server buffers incoming inputs and applies them at the **start** of FixedUpdate, before simulation runs. This prevents inputs from arriving mid-tick.
-
+**FixedUpdate Loop:**
 ```csharp
-// ServerGameLoop.cs:909
+// ServerGameLoop.cs:249
 void FixedUpdate()
 {
-    FlushPendingMovementInputs();  // Apply buffered inputs
-    _simWorld.Tick(Time.fixedDeltaTime);
-    BroadcastSnapshots();
+    RunSimulation();          // Accumulate + tick SimWorld
+    TickWatchdog(dt);         // Force-stop if no input received for 300ms
+    TickRespawns();           // Process 5s respawn queue
+    BroadcastSnapshots();     // Send AOI-filtered snapshots
 }
 ```
 
+**Input Buffering:**
+- Inputs arrive via `ConcurrentQueue` (thread-safe, network thread → main thread)
+- `DrainInputQueueForTick()` sorts inputs into per-client map with `ApplyTick = RecvTick + 1`
+- `FlushPendingMovementInputs()` applies **last-input-wins** per client per tick
+- Watchdog: forces `StopMoving()` if no input received for 300ms (`MOVE_WATCHDOG_TIMEOUT`, `ServerGameLoop.cs:98`)
+
 **AOI System:**
-- Culls entities outside player view range
-- Reduces bandwidth (only send visible entities)
-- Spatial hashing for O(1) visibility queries
+- `SpatialHashGrid` with configurable cell size (default 20 units)
+- Vision radius: 50 units (configurable), with 5-unit hysteresis
+- `SnapshotHelper.CreateFilteredSnapshot()` only includes visible entities
+- Server sends `EntityEnterAOI`/`EntityLeaveAOI` reliable events
+- **TODO:** Client-side `NetworkClient.OnEventReceived()` does not handle `EntityEnterAOI`/`EntityLeaveAOI` events (they are silently ignored). Snapshot filtering works (bandwidth is reduced), but entities that leave AOI remain as frozen ghosts on the client instead of being despawned. Not visible in testing because the 50-unit vision radius covers typical test distances.
 
 ---
 
-### 5. Client Sync Layer
-**Purpose:** Receive snapshots, interpolate, smooth visual rendering
+### 5. Client Rendering Layer
+**Purpose:** Receive snapshots, dead-reckon between them, render with smoothing
 
 | Component | File | Responsibility |
 |-----------|------|----------------|
-| NetworkClient | `Assets/Scripts/Core/NetworkClient.cs:439` | Receives snapshots, manages sync |
-| TimeSync | `Assets/Scripts/Client/Timing/TimeSync.cs` | Adaptive buffer (80-160ms) |
-| BaseInterpolator | `Assets/Scripts/Client/Interpolation/BaseInterpolator.cs:228` | Interpolates basePos from snapshots |
-| VisualOffsetCorrector | `Assets/Scripts/Client/Prediction/VisualOffsetCorrector.cs` | Smooths visual discontinuities |
-| VisualPositionManager | `Assets/Scripts/Client/Prediction/VisualPositionManager.cs:158` | Orchestrates basePos + offset |
+| EntityView | `Scripts/Client/View/Entities/EntityView.cs` | Base class: dead-reckoning + snap smoothing |
+| PlayerView | `Scripts/Client/View/Entities/PlayerView.cs` | Player-specific: class controller, health bar, animations |
+| ProjectileView | `Scripts/Client/View/Entities/ProjectileView.cs` | Cosmetic-only projectile rendering |
 
-**Interpolation Flow:**
-```
-Snapshot arrives → TimeSync.OnSnapshotReceived() → BaseInterpolator.AddSnapshot()
-→ Update() → renderTime = serverTime - buffer
-→ basePos = Lerp(snapshotA, snapshotB, alpha)
-→ visualPos = basePos + visualOffset
-```
+**V5.0 Rendering (Dead-Reckoning + Snap Smoothing):**
 
-**Visual Formula:**
-```
-visualPos = basePos + visualOffset
-```
-- `basePos`: Interpolated server truth (delayed ~100ms for smoothness)
-- `visualOffset`: Absorption offset (corrects jumps, always → 0)
-- `visualPos`: Final rendered position
+There is no interpolation buffer, no visual offset system, no TimeSync. The approach is simpler:
 
----
-
-### 6. Client View Layer
-**Purpose:** Apply synced state to Unity GameObjects
-
-| Component | File | Responsibility |
-|-----------|------|----------------|
-| PlayerView | `Assets/Scripts/Client/View/PlayerView.cs:128` | Renders player entity |
-| EntityView | `Assets/Scripts/Client/View/EntityView.cs` | Base class for all entity views |
-| LocalIntentFeedback | (inline in PlayerView) | Immediate rotation/animation feedback |
-
-**Rendering:**
 ```csharp
-// PlayerView.cs:154
-transform.position = _networkClient.GetVisualPosition();  // basePos + offset
+// EntityView.cs:201
+void UpdatePosition()
+{
+    // Dead-reckoning: extrapolate from last snapshot
+    float dt = Time.time - _lastSnapshotTime;
+    Vector3 deadReckonedPos = _lastServerPos + _lastServerVel * dt;
 
-// Rotation: Immediate local feedback
-if (HasLocalMoveIntent())
-    transform.rotation = LocalIntentFeedback.GetSmoothedRotationY();
-else
-    transform.rotation = _networkClient.GetVisualRotationY();  // Server rotation
+    if (_lastServerVel.sqrMagnitude < 0.01f)
+    {
+        // Stopped: snap directly (no sliding)
+        _visualPos = deadReckonedPos;
+    }
+    else
+    {
+        // Moving: smooth lerp toward dead-reckoned position
+        _visualPos = Vector3.Lerp(_visualPos, deadReckonedPos,
+            NetcodeConstants.VISUAL_SMOOTHING_SPEED * Time.deltaTime);
+    }
+
+    transform.position = _visualPos;
+    transform.rotation = Quaternion.Euler(0, _lastServerRotY, 0);
+}
 ```
+
+**PlayerView adds:**
+- Class-specific animation controllers (Archer, Mage, Fighter, etc.)
+- Health bar (world-space `HealthBarUI`)
+- Base layer animation: `Speed`, `IsMoving`, `IsGrounded`, `IsJumping`, `IsFalling`
+- Ability animation triggers via `TriggerAbility(slot)` from network events
+
+---
+
+### 6. Gameplay Systems (New in V5.0)
+
+These systems were added after the original netcode implementation:
+
+| System | Key Files | Description |
+|--------|-----------|-------------|
+| **Character Classes** | `GameSim/Data/CharacterClass.cs`, `Client/View/Animation/` | 8 classes: Archer, Mage, Fighter, Assassin, Tank, Healer, Summoner, Warrior |
+| **Abilities** | `GameSim/Data/AbilityDefinition.cs`, `GameSim/Commands/Handlers/AbilityHandler.cs` | ScriptableObject definitions, server-side execution, cooldown tracking |
+| **Casting** | `Scripts/Client/Casting/CastController.cs`, `SkillshotIndicator.cs` | NormalCast / QuickCast / QuickCastWithIndicator modes |
+| **Targeting** | `Scripts/Client/Targeting/TargetingSystem.cs`, `TargetIndicator.cs` | Tab-target: lock, cycle, clear |
+| **Projectiles** | `GameSim/Entities/SimProjectile.cs`, `Client/View/Entities/ProjectileView.cs` | Server-authoritative projectile physics + client cosmetic view |
+| **HUD** | `Scripts/Client/View/UI/HUD/` | AbilityBarUI (4 slots), HealthBarUI, TargetInfoUI |
+| **Settings** | `Scripts/Client/View/UI/Settings/` | Keybinds, cast mode, movement mode (configurable) |
+| **Class Selection** | `Scripts/Client/View/UI/Bootstrap/ClassSelectionUI.cs` | Deferred spawn: player entity waits for class choice before creating PlayerView |
 
 ---
 
@@ -243,38 +307,34 @@ else
 ### Input → Server (Client to Server)
 
 ```
-1. Keyboard press (0ms)
-2. InputCollector detects input (0ms)
-3. IntentBuilder creates MoveDir intent (0ms, rate-limited to 120Hz)
-4. NetworkClient queues packet (0ms)
-5. FishNetAdapter sends UDP packet (0ms, double-flush in LateUpdate)
-6. Server receives packet (+17ms network + server poll)
-7. ServerGameLoop buffers input (0ms)
-8. FixedUpdate applies input to SimWorld (+0ms, same tick)
+1. User presses W (or right-clicks)                          [0ms]
+2. InputCollector detects input                                [0ms]
+3. IntentBuilder creates MoveDir/MoveTo (rate-limited 120Hz)  [0ms]
+4. NetworkClient.SendInputIntent() queues intent               [0ms]
+5. SendInputUpdate() builds InputPacket at 120Hz              [0ms]
+6. FishNetAdapter sends UDP packet                             [0ms]
+7. LateUpdate() flushes outgoing via ForceIterateOutgoing()   [0ms]
+   ── network ──
+8. Server receives InputPacket                                [+RTT/2]
+9. BufferMovementInput() → ConcurrentQueue                    [0ms]
+10. FixedUpdate → DrainInputQueueForTick() + FlushPendingMovementInputs()
+11. SimWorld.Step() applies movement                          [0ms]
 ```
-
-**Client-side latency:** 0ms (all in same frame)
-**Network latency:** ~17ms (localhost)
 
 ### Simulation → Visual (Server to Client)
 
 ```
-9. Server simulates tick (+16ms, 60Hz tick interval)
-10. ServerGameLoop broadcasts snapshot (0ms)
-11. Client receives snapshot (+17ms network + client poll)
-12. NetworkClient processes snapshot (0ms)
-13. TimeSync calculates renderTime (0ms)
-14. BaseInterpolator interpolates basePos (0ms)
-15. VisualPositionManager adds offset (0ms)
-16. PlayerView applies transform.position (0ms)
+12. BroadcastSnapshots() creates AOI-filtered SnapshotDelta  [0ms]
+13. FishNetAdapter sends UDP packet                           [0ms]
+    ── network ──
+14. Client receives SnapshotDelta                             [+RTT/2]
+15. NetworkClient.OnSnapshotReceived() dispatches to views    [0ms]
+16. PlayerView.OnSnapshotReceived(pos, vel, rotY)             [0ms]
+17. EntityView.UpdatePosition() [every frame]:
+      deadReckonedPos = serverPos + serverVel * dt
+      visualPos = Lerp(visualPos, deadReckonedPos, k * dt)
+      transform.position = visualPos                          [0ms]
 ```
-
-**Server processing:** ~16ms (tick interval)
-**Client rendering:** 0ms + ~100ms interpolation buffer (for smoothness)
-
-**Total measured latency (localhost):** ~50ms input → visual position change
-
-See [Network/04_Performance_Metrics.md](../Network/04_Performance_Metrics.md) for detailed breakdown.
 
 ---
 
@@ -282,40 +342,79 @@ See [Network/04_Performance_Metrics.md](../Network/04_Performance_Metrics.md) fo
 
 ### 1. Server Authoritative
 - Server is single source of truth for all gameplay
-- Client sends only **intents**, never state (position/velocity)
-- Client corrections are **passive** (smooth toward server state)
+- Client sends only **intents** (MoveDir, MoveTo, Stop, Follow), never state
+- Client displays server state with dead-reckoning smoothing
 
-### 2. Deterministic Simulation
-- Fixed timestep (60Hz)
-- Same inputs → same outputs
-- No floating-point non-determinism (quantized network messages)
+### 2. Dead-Reckoning (Not Interpolation)
+- V5.0 removed the interpolation buffer/visual offset system
+- Client extrapolates: `pos = lastServerPos + lastServerVel * timeSinceSnapshot`
+- Lerp smoothing when moving, direct snap when stopped
+- `VISUAL_SMOOTHING_SPEED = 18` controls lerp rate
 
-### 3. Visual Smoothing (Not Prediction)
+### 3. No Client-Side Prediction
 - Client does NOT predict future positions
-- Client interpolates between server snapshots (delayed truth)
-- Visual offset absorbs basePos jumps for continuity
+- Client does NOT rollback or replay inputs
+- Position updates come only from server snapshots
 
-### 4. Immediate Feedback Where Safe
-- **Rotation:** Immediate (can't desync, purely visual)
-- **Animation:** Immediate (can't desync, purely visual)
-- **Position:** Server-authoritative (can desync, must wait for server)
+### 4. Immediate Server Feedback
+- Rotation: from server snapshot (applied via `_lastServerRotY`)
+- Animation: derived from server velocity (`_lastServerVel.magnitude`)
+- Position: dead-reckoned from server state
 
 ---
 
 ## Configuration Constants
 
-Key constants controlling system behavior:
-
 | Constant | Value | File | Purpose |
 |----------|-------|------|---------|
-| `TICK_RATE` | 60 Hz | `SimConfig.cs` | Server simulation rate |
-| `SNAPSHOT_RATE` | 60 Hz | `NetcodeConstants.cs:50` | Snapshot broadcast rate |
-| `INPUT_SEND_RATE` | 120 Hz | `NetworkClient.cs:54` | Client input send rate |
-| `INTENT_SEND_INTERVAL` | 8.3ms | `IntentBuilder.cs:37` | Intent rate-limit |
-| `ADAPTIVE_BUFFER_TARGET` | 100ms | `NetcodeConstants.cs:381` | Interpolation buffer target |
-| `ADAPTIVE_BUFFER_MIN` | 80ms | `NetcodeConstants.cs:382` | Minimum buffer |
-| `ADAPTIVE_BUFFER_MAX` | 160ms | `NetcodeConstants.cs:383` | Maximum buffer |
-| `PLAYER_SPEED` | 8 u/s | `NetcodeConstants.cs:56` | Default movement speed |
+| `TICK_RATE` | 60 Hz | `NetcodeConstants.cs:23` | Server simulation rate |
+| `SNAPSHOT_RATE` | 60 Hz (= TICK_RATE) | `NetcodeConstants.cs:29` | Snapshot broadcast rate |
+| `_inputSendRate` | 120 Hz | `NetworkClient.cs:43` | Client input send rate |
+| `INTENT_SEND_INTERVAL` | 8.3ms (120Hz) | `IntentBuilder.cs:37` | WASD rate-limit |
+| `VISUAL_SMOOTHING_SPEED` | 18 | `NetcodeConstants.cs:92` | Dead-reckoning lerp rate |
+| `PLAYER_SPEED` | 8 u/s | `NetcodeConstants.cs:34` | Default movement speed |
+| `INPUT_REDUNDANCY_COUNT` | 3 | `NetcodeConstants.cs:45` | Event commands per packet |
+| `PlayerMaxHealth` | 100 | `SimConfig.cs:37` | Default max health |
+| `PlayerRotationSpeed` | 720 deg/s | `SimConfig.cs:28` | Server-side rotation speed |
+| `RespawnTime` | 5s | `SimConfig.cs:57` | Death → respawn delay |
+
+---
+
+## Namespace Map
+
+| Namespace | Location | Purpose |
+|-----------|----------|---------|
+| `MOBANet.GameSim.Core` | `Assets/GameSim/Core/` | SimWorld, SimConfig, TickClock, MovementEngine |
+| `MOBANet.GameSim.Entities` | `Assets/GameSim/Entities/` | SimEntity, SimPlayer, SimProjectile |
+| `MOBANet.GameSim.States` | `Assets/GameSim/States/` | TransformState, StatsState, AbilityState, CombatState |
+| `MOBANet.GameSim.Commands` | `Assets/GameSim/Commands/` | SimCommand, CommandDispatcher, ICommandHandler |
+| `MOBANet.GameSim.Commands.Handlers` | `Assets/GameSim/Commands/Handlers/` | MovementHandler, AbilityHandler, SystemHandler |
+| `MOBANet.GameSim.Events` | `Assets/GameSim/Events/` | SimEvent, SimEventType |
+| `MOBANet.GameSim.Data` | `Assets/GameSim/Data/` | AbilityDefinition, CharacterClass, AbilityTargetType |
+| `MOBANet.NetAdapter` | `Assets/Scripts/Network/NetAdapter/` | SnapshotHelper, CommandHelper |
+| `MOBANet.NetAdapter.FishNet` | `Assets/Scripts/Network/NetAdapter/FishNet/` | FishNetAdapter (only FishNet import) |
+| `MOBANet.NetAdapter.Messages` | `Assets/Scripts/Network/NetAdapter/Messages/` | SnapshotDelta, InputPacket, ReliableEvent, GameCommand, MatchConfigBroadcast |
+| `MOBANet.NetAdapter.AOI` | `Assets/Scripts/Network/NetAdapter/AOI/` | AOIManager, SpatialHashGrid |
+| `MOBANet.NetAdapter.Buffers` | `Assets/Scripts/Network/NetAdapter/Buffers/` | ServerCommandBuffer ~~(ClientSnapshotBuffer exists but is unused dead code from V4.x)~~ |
+| `MOBANet.NetAdapter.Metrics` | `Assets/Scripts/Network/NetAdapter/Metrics/` | IPingTracker |
+| `MOBANet.Shared` | `Assets/Scripts/Network/Shared/` | NetcodeConstants, CommandTypes, Constants |
+| `MOBANet.Server` | `Assets/Scripts/Server/` | ServerGameLoop, ServerLauncher |
+| `MOBANet.UnityView.Core` | `Assets/Scripts/Core/` | NetworkClient |
+| `MOBANet.UnityView.Entities` | `Assets/Scripts/Client/View/Entities/` | EntityView, PlayerView, ProjectileView |
+| `MOBANet.UnityView.Input` | `Assets/Scripts/Client/Input/` | InputCollector, InputBuffer |
+| `MOBANet.Client.Input` | `Assets/Scripts/Client/Input/` | IntentBuilder, InputIntent |
+| `MOBANet.Client.Animation` | `Assets/Scripts/Client/View/Animation/` | Class controllers (Archer, Mage, ...) |
+| `MOBANet.Client.Casting` | `Assets/Scripts/Client/Casting/` | CastController, SkillshotIndicator |
+| `MOBANet.Client.Targeting` | `Assets/Scripts/Client/Targeting/` | TargetingSystem, TargetIndicator |
+| `MOBANet.Client.HUD` | `Assets/Scripts/Client/View/UI/HUD/` | HealthBarUI, TargetInfoUI |
+| `MOBANet.Client.UI` | `Assets/Scripts/Client/View/UI/` | ClassSelectionUI, AbilityBarUI, AbilitySlotUI, HUDManager |
+| `MOBANet.Client.Settings` | `Assets/Scripts/Client/View/UI/Settings/` | GameSettings, SettingsManager |
+| `MOBANet.GameSim.Types` | `Assets/GameSim/Types/` | Team |
+| `MOBANet.GameSim.Interfaces` | `Assets/GameSim/Interfaces/` | IDamageable |
+| `MOBANet.Core` | `Assets/Scripts/Client/View/Core/` | DebugLogger, DebugSettings |
+| `MOBANet.UnityView.Core` | `Assets/Scripts/Client/View/UI/Bootstrap/` | GameBootstrap |
+| *(no namespace)* | `Assets/Scripts/Client/View/Core/` | GameManager (singleton, wires prefabs/references) |
+| `MOBANet.Diagnostics` | `Assets/Scripts/Debug/` | MovementDebugger, MovementCycleLogger, NetworkPingMeasure |
 
 ---
 
@@ -324,30 +423,26 @@ Key constants controlling system behavior:
 ### Bandwidth Usage
 
 **Per client upload (120Hz input):**
-- Packet size: 14 bytes (MoveDir)
-- Continuous input: 14 × 120 = 1,680 bytes/sec = **1.6 KB/s**
-- Actual (with rate-limiting): ~1.5 KB/s
+- Packet header: 14 bytes
+- With 3 redundant event commands: ~14 + 3*12 = ~50 bytes
+- Rate: ~50 * 120 = 6,000 bytes/sec = **~6 KB/s** (with events)
+- Idle (no intent): still sends at 120Hz but smaller packets
 
 **Per client download (60Hz snapshots, 1 entity visible):**
-- Packet size: ~40 bytes (1 entity)
-- Rate: 40 × 60 = 2,400 bytes/sec = **2.4 KB/s**
-- Scales with visible entity count (AOI culling helps)
-
-**100 player server:**
-- Upload: 100 × 1.6 = 160 KB/s
-- Download per client: ~2.4 KB/s (AOI-culled)
-- Download total: 100 × 2.4 = 240 KB/s
+- Header: 14 bytes + 1 entity * 30 bytes = 44 bytes
+- Rate: 44 * 60 = 2,640 bytes/sec = **~2.6 KB/s**
+- Scales with visible entity count (AOI culling limits this)
 
 ### Latency Budget (Localhost)
 
 | Stage | Time | Cumulative |
 |-------|------|------------|
 | Input capture → socket send | 0ms | 0ms |
-| Network → server receive | 17ms | 17ms |
-| Server process → broadcast | 16ms | 33ms |
-| Network → client receive | 17ms | **50ms** |
+| Network → server receive | ~17ms | ~17ms |
+| Server process → broadcast | ~16ms | ~33ms |
+| Network → client receive | ~17ms | **~50ms** |
 
-**Note:** Adaptive buffer adds ~100ms perceived delay for visual smoothness (hidden by interpolation).
+Dead-reckoning adds no perceivable delay (extrapolates forward from last snapshot).
 
 ---
 
@@ -356,38 +451,33 @@ Key constants controlling system behavior:
 ### Why This Architecture?
 
 **Advantages:**
-- ✅ **Anti-cheat:** Client can't manipulate position/velocity
-- ✅ **Consistency:** What you see happened on server (no rollback)
-- ✅ **Determinism:** Replays, debugging, server-side verification
-- ✅ **Simplicity:** No complex client-side prediction/reconciliation
+- Anti-cheat: Client can't manipulate position/velocity
+- Consistency: What you see happened on server (no rollback artifacts)
+- Simplicity: No prediction/reconciliation, no interpolation buffer
+- Determinism: Server-only simulation enables replays
 
 **Disadvantages:**
-- ❌ **Perceived latency:** ~50-100ms delay for position changes
-- ❌ **High-ping penalty:** Visible rubber-banding if ping > 200ms
-- ❌ **Feels "heavy":** Less responsive than FPS client-prediction
+- Perceived latency: ~50ms+ delay for position changes
+- High-ping penalty: Visible rubber-banding if ping > 200ms
+- No local prediction: Movement feels "heavier" than FPS-style
 
 **Why LoL-style over FPS-style?**
 
-This architecture is optimal for:
-- Top-down MOBA/RTS games
-- Turn-based or ability-based combat (not twitch shooting)
+Optimal for:
+- Top-down MOBA/action-RPG
+- Ability-based combat (not twitch shooting)
 - Anti-cheat priority
-- Deterministic replay requirements
-
-See [Architecture/03_Design_Rationale.md](03_Design_Rationale.md) for detailed comparison.
+- Server-side complexity (pathfinding, abilities, RNG)
 
 ---
 
 ## Next Steps
 
-1. **Understand the philosophy:** Read [03_Design_Rationale.md](03_Design_Rationale.md)
-2. **Learn LoL-style netcode:** Read [02_LoL_Style_Netcode.md](02_LoL_Style_Netcode.md)
-3. **Dive into components:**
-   - [GameSim/GameSim_Overview.md](../GameSim/GameSim_Overview.md) - Pure simulation
-   - [Network/01_Network_Architecture.md](../Network/01_Network_Architecture.md) - Message flow
-   - [Client/Client_Architecture.md](../Client/Client_Architecture.md) - Sync system
-   - [Server/Server_Loop.md](../Server/Server_Loop.md) - Server tick loop
+1. **Dive into components:**
+   - [GameSim/01_GameSim_Overview.md](../GameSim/01_GameSim_Overview.md) - Pure simulation
+   - [Client/01_Client_Architecture.md](../Client/01_Client_Architecture.md) - Client systems
+   - [Server/01_Server_Loop.md](../Server/01_Server_Loop.md) - Server tick loop
 
 ---
 
-**Last Updated:** 2026-02-03
+**Last Updated:** 2026-02-18

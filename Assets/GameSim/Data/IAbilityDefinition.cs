@@ -18,6 +18,9 @@ namespace MOBANet.GameSim.Data
         float BaseCooldown { get; }
         float BaseRange { get; }
 
+        // Visuals
+        GameObject ProjectilePrefab { get; }
+
         // Targeting
         AbilityTargetType TargetType { get; }
         TargetFilter TargetFilter { get; }

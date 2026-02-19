@@ -148,7 +148,7 @@ namespace MOBANet.GameSim.Entities
         #region Simulation (called by SimWorld.Tick)
 
         /// <summary>
-        /// Tick simulation (30Hz).
+        /// Tick simulation (60Hz, matches NetcodeConstants.TICK_RATE).
         /// Called by SimWorld.Tick().
         /// </summary>
         public override void Tick(float dt, SimConfig config)
@@ -171,90 +171,8 @@ namespace MOBANet.GameSim.Entities
 
         private void TickMovement(float dt, SimConfig config)
         {
-            // Apply horizontal movement velocity (preserve vertical component)
-            var vel = Transform.Velocity;
-
-            if (Transform.IsMoving && Transform.MoveDirection.sqrMagnitude > 0.01f)
-            {
-                float moveSpeed = config.PlayerMoveSpeed * Stats.MoveSpeedModifier;
-                Vector3 horizontalVel = Transform.MoveDirection * moveSpeed;
-                vel.x = horizontalVel.x;
-                vel.z = horizontalVel.z;
-                // vel.y is preserved (gravity/jump)
-            }
-            else
-            {
-                vel.x = 0f;
-                vel.z = 0f;
-                // vel.y is preserved (gravity/jump)
-            }
-
-            Transform.Velocity = vel;
-
-            // Apply gravity & physics
-            ApplyGravity(dt, config);
-
-            // Update rotation (smooth turn)
-            if (Transform.MoveDirection.sqrMagnitude > 0.01f)
-            {
-                float targetRotation = Mathf.Atan2(Transform.MoveDirection.x, Transform.MoveDirection.z) * Mathf.Rad2Deg;
-                float maxDelta = config.PlayerRotationSpeed * dt;
-                Transform.RotationY = Mathf.MoveTowardsAngle(Transform.RotationY, targetRotation, maxDelta);
-            }
-        }
-
-        private void ApplyGravity(float dt, SimConfig config)
-        {
-            if (Transform.IsGrounded)
-            {
-                // Grounded movement - apply pull down force
-                var vel = Transform.Velocity;
-                vel.y = config.GroundedPullDown;
-                Transform.Velocity = vel;
-
-                Vector3 movement = Transform.Velocity * dt;
-                Transform.Position += movement;
-
-                // Check if still grounded
-                if (Transform.Position.y <= 0f)
-                {
-                    Transform.Position = new Vector3(Transform.Position.x, 0f, Transform.Position.z);
-                    Transform.IsGrounded = true;
-                }
-                else
-                {
-                    Transform.IsGrounded = false;
-                }
-            }
-            else
-            {
-                // Falling - apply gravity
-                var vel = Transform.Velocity;
-                vel.y += config.Gravity * dt;
-                Transform.Velocity = vel;
-
-                Vector3 movement = Transform.Velocity * dt;
-                Transform.Position += movement;
-
-                // Check landing
-                if (Transform.Position.y <= 0f)
-                {
-                    Transform.Position = new Vector3(Transform.Position.x, 0f, Transform.Position.z);
-                    vel = Transform.Velocity;
-                    vel.y = 0f;
-                    Transform.Velocity = vel;
-                    Transform.IsGrounded = true;
-                }
-            }
-
-            // Clamp to arena bounds
-            float halfWidth = config.ArenaWidth / 2f;
-            float halfHeight = config.ArenaHeight / 2f;
-            Transform.Position = new Vector3(
-                Mathf.Clamp(Transform.Position.x, -halfWidth, halfWidth),
-                Mathf.Max(Transform.Position.y, 0f),
-                Mathf.Clamp(Transform.Position.z, -halfHeight, halfHeight)
-            );
+            float moveSpeed = config.PlayerMoveSpeed * Stats.MoveSpeedModifier;
+            MovementEngine.Tick(ref Transform, moveSpeed, config, dt, useTurnSlowdown: true);
         }
 
         private void TickAbilities(float dt)
@@ -355,19 +273,12 @@ namespace MOBANet.GameSim.Entities
         }
 
         /// <summary>
-        /// Stop moving (horizontal only, preserves vertical velocity).
+        /// Stop moving. Clears direction and IsMoving flag.
+        /// Does NOT clear Velocity — impulses (knockback, dash) decay via MovementEngine friction.
         /// </summary>
         public void StopMoving()
         {
             Transform.MoveDirection = Vector3.zero;
-
-            // Stop horizontal movement but preserve vertical velocity (gravity/jump)
-            var vel = Transform.Velocity;
-            vel.x = 0f;
-            vel.z = 0f;
-            // vel.y is preserved
-            Transform.Velocity = vel;
-
             Transform.IsMoving = false;
         }
 
@@ -398,7 +309,20 @@ namespace MOBANet.GameSim.Entities
         private void Die(uint killerId)
         {
             Debug.Log($"[SimPlayer] Player {Id} killed by {killerId}");
-            // TODO: Death logic
+            StopMoving();
+        }
+
+        /// <summary>
+        /// Respawn at position with full HP.
+        /// </summary>
+        public void Respawn(Vector3 position)
+        {
+            Stats.Health = Stats.MaxHealth;
+            Transform.Position = position;
+            Transform.Velocity = Vector3.zero;
+            Transform.EffectiveVelocity = Vector3.zero;
+            Transform.IsMoving = false;
+            Transform.MoveDirection = Vector3.zero;
         }
 
         #endregion
@@ -410,22 +334,50 @@ namespace MOBANet.GameSim.Entities
         /// </summary>
         public void ApplyNetworkState(Vector3 position, Vector3 velocity, float rotationY)
         {
+            ApplyTransformState(position, velocity, rotationY);
+        }
+
+        /// <summary>
+        /// Apply state from network snapshot, including cooldowns.
+        /// Overload that accepts an EntityState for cooldown data.
+        /// </summary>
+        public void ApplyNetworkState(Vector3 position, Vector3 velocity, float rotationY,
+            in MOBANet.NetAdapter.Messages.EntityState netState)
+        {
+            ApplyTransformState(position, velocity, rotationY);
+
+            // Sync health from snapshot
+            Stats.Health = netState.Health;
+
+            // Apply cooldowns from snapshot
+            if (Abilities.Cooldowns != null)
+            {
+                for (int i = 0; i < 4 && i < Abilities.Cooldowns.Length; i++)
+                {
+                    Abilities.Cooldowns[i] = netState.GetCooldown(i);
+                }
+            }
+        }
+
+        private void ApplyTransformState(Vector3 position, Vector3 velocity, float rotationY)
+        {
             Transform.Position = position;
             Transform.RotationY = rotationY;
 
-            // Derive movement state from velocity
+            // velocity from snapshot is EffectiveVelocity (impulse + input)
+            Transform.EffectiveVelocity = velocity;
+
+            // Derive movement state from effective velocity
             float horizontalSpeed = new Vector2(velocity.x, velocity.z).magnitude;
             Transform.IsMoving = horizontalSpeed > 0.1f;
 
             if (Transform.IsMoving)
             {
                 Transform.MoveDirection = new Vector3(velocity.x, 0f, velocity.z).normalized;
-                Transform.Velocity = velocity;
             }
             else
             {
                 Transform.MoveDirection = Vector3.zero;
-                Transform.Velocity = Vector3.zero;
             }
         }
 

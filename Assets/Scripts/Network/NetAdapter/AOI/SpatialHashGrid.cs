@@ -20,7 +20,7 @@ namespace MOBANet.NetAdapter.AOI
         /// <summary>
         /// Create a spatial hash grid.
         /// </summary>
-        /// <param name="cellSize">Size of each cell. Should be ~2x vision radius for efficiency.</param>
+        /// <param name="cellSize">Size of each cell. Should be ~2-3x smaller than vision radius for efficiency (e.g. 20 for radius 50).</param>
         public SpatialHashGrid(float cellSize = 20f)
         {
             _cellSize = cellSize;

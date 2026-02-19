@@ -1,5 +1,5 @@
 // IntentBuilder.cs - Converts raw input (click/WASD) to InputIntent (V3.0)
-// Rate-limited to ~10Hz for network efficiency
+// Rate-limited to 120Hz (aligned with NetworkClient._inputSendRate)
 // Click -> MoveTo (world position), WASD -> MoveDir (normalized direction)
 //
 // V3.0 Changes:
@@ -19,7 +19,7 @@ namespace MOBANet.Client.Input
     /// Converts raw input (mouse clicks, keyboard) into InputIntent.
     ///
     /// Click-to-move: Immediate MoveTo to clicked position (world coordinates)
-    /// WASD/ZQSD: Periodic MoveDir at 10Hz with normalized direction
+    /// WASD/ZQSD: Periodic MoveDir at 120Hz with normalized direction
     ///
     /// SEMANTIC SEPARATION:
     /// - MoveDir = direction vector (WASD) - server applies speed
@@ -100,7 +100,7 @@ namespace MOBANet.Client.Input
 
         /// <summary>
         /// Handle keyboard movement input (WASD/ZQSD).
-        /// Rate-limited to ~10Hz. Sends MoveDir with normalized direction.
+        /// Rate-limited to 120Hz. Sends MoveDir with normalized direction.
         ///
         /// V3.0: Returns MoveDir (direction) instead of MoveTo (position).
         /// Server applies speed and handles simulation.
@@ -142,7 +142,7 @@ namespace MOBANet.Client.Input
                 return null;
             }
 
-            // Rate limit: ~10Hz
+            // Rate limit: 120Hz
             if (_accumulator < INTENT_SEND_INTERVAL)
                 return null;
 

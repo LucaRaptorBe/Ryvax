@@ -29,9 +29,16 @@ namespace MOBANet.GameSim.States
         #region Velocity
 
         /// <summary>
-        /// Velocity in 3D space (includes horizontal XZ and vertical Y components)
+        /// Impulse velocity (knockback, dash, jump). Decays via MovementEngine friction.
+        /// Internal to physics — do not use for animation or snapshots.
         /// </summary>
         public Vector3 Velocity;
+
+        /// <summary>
+        /// Total velocity (impulse + input). Written by MovementEngine.Tick() each tick.
+        /// Used by snapshots, animation, and dead-reckoning.
+        /// </summary>
+        public Vector3 EffectiveVelocity;
 
         #endregion
 

@@ -9,6 +9,7 @@ using MOBANet.GameSim.Entities;
 using MOBANet.UnityView.Core;
 using MOBANet.Diagnostics;
 using MOBANet.Client.Animation;
+using MOBANet.Client.HUD;
 
 namespace MOBANet.UnityView.Entities
 {
@@ -34,6 +35,7 @@ namespace MOBANet.UnityView.Entities
         private AnimatorLayerManager _layerManager;
         private ICharacterClassController _classController;
         private CharacterClassType _currentClass;
+        private HealthBarUI _healthBar;
 
         #endregion
 
@@ -82,7 +84,23 @@ namespace MOBANet.UnityView.Entities
 
             transform.position = simPlayer.Transform.Position;
 
+            // Ensure a collider exists for mouse targeting raycasts
+            if (GetComponentInChildren<Collider>() == null)
+            {
+                var col = gameObject.AddComponent<CapsuleCollider>();
+                col.center = new Vector3(0f, 1f, 0f);
+                col.radius = 0.5f;
+                col.height = 2f;
+            }
+
             base.Initialize(simPlayer.Id, isLocal, networkClient);
+
+            // Create health bar
+            var healthBarGO = new GameObject("HealthBar");
+            healthBarGO.transform.SetParent(transform);
+            _healthBar = healthBarGO.AddComponent<HealthBarUI>();
+            byte localTeamId = networkClient != null ? networkClient.GetLocalTeamId() : (byte)0;
+            _healthBar.Initialize(transform, isLocal, simPlayer.TeamId, localTeamId);
         }
 
         #endregion
@@ -115,7 +133,16 @@ namespace MOBANet.UnityView.Entities
 
         protected override void UpdateAnimation()
         {
-            if (_animator == null || _simPlayer == null) return;
+            if (_simPlayer == null) return;
+
+            // Update health bar
+            if (_healthBar != null)
+            {
+                _healthBar.UpdateHealth(_simPlayer.Stats.HealthPercent);
+                _healthBar.SetVisible(_simPlayer.Stats.IsAlive);
+            }
+
+            if (_animator == null) return;
 
             // Update base layer animations (locomotion, jump, fall)
             UpdateBaseLayerAnimations();
@@ -126,10 +153,13 @@ namespace MOBANet.UnityView.Entities
 
         private void UpdateBaseLayerAnimations()
         {
-            Vector3 velocity = _simPlayer.Transform.Velocity;
+            Vector3 velocity = _simPlayer.Transform.EffectiveVelocity;
             float horizontalSpeed = new Vector2(velocity.x, velocity.z).magnitude;
             bool isMoving = horizontalSpeed > 0.1f;
+            // TODO: IsGrounded is never synced in snapshots — always true client-side.
+            // Wire it up once jump is functional (needs IsGrounded in EntityState + ApplyTransformState).
             bool isGrounded = _simPlayer.Transform.IsGrounded;
+            // TODO: Replace 8f with the entity's effective move speed once per-entity stats exist
             float normalizedSpeed = Mathf.Clamp01(horizontalSpeed / 8f);
 
             // Update locomotion parameters
@@ -137,12 +167,12 @@ namespace MOBANet.UnityView.Entities
             _animator.SetBool(IsMovingHash, isMoving);
             _animator.SetBool(IsGroundedHash, isGrounded);
 
-            // Debug: Log speed values (comment out when not needed)
-            if (_isLocalPlayer && Time.frameCount % 60 == 0) // Log every 60 frames (~1 second)
-            {
-                Debug.Log($"[PlayerView Animation] Speed: {normalizedSpeed:F2} (Raw: {horizontalSpeed:F2} u/s) | " +
-                          $"Velocity: {velocity} | Moving: {isMoving} | Grounded: {isGrounded}");
-            }
+            // Debug: Log speed values (uncomment when needed)
+            // if (_isLocalPlayer && Time.frameCount % 60 == 0)
+            // {
+            //     Debug.Log($"[PlayerView Animation] Speed: {normalizedSpeed:F2} (Raw: {horizontalSpeed:F2} u/s) | " +
+            //               $"Velocity: {velocity} | Moving: {isMoving} | Grounded: {isGrounded}");
+            // }
 
             // Update jump/fall parameters based on vertical velocity
             float verticalVelocity = velocity.y;
@@ -298,6 +328,30 @@ namespace MOBANet.UnityView.Entities
                     }
                     break;
             }
+        }
+
+        #endregion
+
+        #region Combat Events
+
+        public override void OnDamage(int amount)
+        {
+            base.OnDamage(amount); // trigger Hit animation
+            FloatingDamageText.Spawn(amount, transform.position + Vector3.up * 2f);
+        }
+
+        public override void OnDeath()
+        {
+            base.OnDeath();
+            if (_healthBar != null)
+                _healthBar.SetVisible(false);
+        }
+
+        public override void OnRespawn(Vector3 position)
+        {
+            base.OnRespawn(position);
+            if (_healthBar != null)
+                _healthBar.SetVisible(true);
         }
 
         #endregion

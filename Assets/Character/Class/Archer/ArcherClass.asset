@@ -15,8 +15,8 @@ MonoBehaviour:
   className: Archer
   classIcon: {fileID: 0}
   classType: 1
-  passive: {fileID: 11400000, guid: cae00fe8180a04a29b3d28fdffacf142, type: 2}
-  ability1: {fileID: 11400000, guid: f2aca94da88e640648f2b14df4f60058, type: 2}
-  ability2: {fileID: 11400000, guid: a847001ba0fec49b3b1e9edcaf64ca3c, type: 2}
-  ability3: {fileID: 11400000, guid: 5d5d34456ff4849f29b33ff12b88cfd5, type: 2}
-  ability4: {fileID: 11400000, guid: 5b188391755e74625a3229dc52888ed2, type: 2}
+  passive: {fileID: 11400000, guid: d07299ceb53e24b389d48ba73c65214a, type: 2}
+  ability1: {fileID: 11400000, guid: 554cf5b4c7f6c4bbcaf677112f9a12c4, type: 2}
+  ability2: {fileID: 11400000, guid: 6307b0502db554aa7be05f2bca635ccf, type: 2}
+  ability3: {fileID: 11400000, guid: 7df30352db35c4ec99d496be50fb4d9f, type: 2}
+  ability4: {fileID: 11400000, guid: 516152af1895243b586d076e83e97cc9, type: 2}

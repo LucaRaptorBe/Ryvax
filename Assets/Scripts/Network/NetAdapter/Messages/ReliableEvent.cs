@@ -250,6 +250,60 @@ namespace MOBANet.NetAdapter.Messages
             return (byte)evt.Data1;
         }
 
+        #region Factory Methods - Combat
+
+        /// <summary>
+        /// Create AbilityUsed event.
+        /// Data1: slot (low byte) + dirX quantized (high 16 bits)
+        /// Data2: dirZ quantized (low 16 bits)
+        /// </summary>
+        public static ReliableEvent AbilityUsed(uint tick, uint casterId, byte slot, Vector3 direction)
+        {
+            short dirX = (short)(direction.x * 127f);
+            uint data1 = (uint)((slot & 0xFF) | (((ushort)dirX) << 16));
+            short dirZ = (short)(direction.z * 127f);
+            uint data2 = (uint)(ushort)dirZ;
+
+            return new ReliableEvent
+            {
+                ServerTick = tick,
+                Type = EventType.AbilityUsed,
+                EntityId = casterId,
+                Data1 = data1,
+                Data2 = data2
+            };
+        }
+
+        /// <summary>
+        /// Decode AbilityUsed event data.
+        /// </summary>
+        public static (byte slot, Vector3 direction) DecodeAbilityUsed(ReliableEvent evt)
+        {
+            byte slot = (byte)(evt.Data1 & 0xFF);
+            short dirX = (short)(evt.Data1 >> 16);
+            short dirZ = (short)(evt.Data2 & 0xFFFF);
+            Vector3 dir = new Vector3(dirX / 127f, 0f, dirZ / 127f);
+            if (dir.sqrMagnitude > 0.01f) dir = dir.normalized;
+            return (slot, dir);
+        }
+
+        /// <summary>
+        /// Create DamageDealt event (projectile/ability hit).
+        /// </summary>
+        public static ReliableEvent DamageDealt(uint tick, uint targetId, uint attackerId, uint damage)
+        {
+            return new ReliableEvent
+            {
+                ServerTick = tick,
+                Type = EventType.DamageDealt,
+                EntityId = targetId,
+                Data1 = attackerId,
+                Data2 = damage
+            };
+        }
+
+        #endregion
+
         #endregion
     }
 

@@ -2,7 +2,7 @@
 
 > **Status:** Production
 > **Version:** 4.0 (Intent-based)
-> **Last Updated:** 2026-02-03
+> **Last Updated:** 2026-02-18
 
 ## Overview
 
@@ -22,10 +22,10 @@ This document specifies the **byte-level format** of all network messages in Ryv
 | Message | Size | Direction | Frequency | Purpose |
 |---------|------|-----------|-----------|---------|
 | `InputPacket` | ~14-56 bytes | C→S | 120Hz (continuous input) | Player inputs + events |
-| `SnapshotDelta` | ~40-300 bytes | S→C | 60Hz | World state (all entities) |
+| `SnapshotDelta` | ~44-300+ bytes | S→C | 60Hz | World state (all entities) |
 | `GameCommand` | 14 bytes | C→S | On-demand | Discrete actions (jump, cast) |
-| `ReliableEvent` | Variable | S→C | On-demand | Critical events (spawn, death) |
-| `MatchConfig` | Variable | S→C | Once per connect | Match initialization |
+| `ReliableEvent` | 17 bytes | S→C | On-demand | Critical events (spawn, death) |
+| `MatchConfig` | Variable | S→C | Once per connect | Match initialization (IBroadcast) |
 
 ---
 
@@ -304,6 +304,8 @@ if (packet.Version < 4)
 }
 ```
 
+> **Note (currently inert):** `InputPacket.Version` is a read-only property that always returns the compile-time constant `MSG_VERSION` (see `InputPacket.cs:53`: `public ushort Version => MSG_VERSION`). Because client and server share the same binary, `packet.Version < InputPacket.MSG_VERSION` is always `false` and the guard never fires. The check becomes meaningful only when a client built against an older version connects to a newer server — a scenario that does not occur in the current single-binary setup. When client and server are shipped as separate binaries this must be revisited.
+
 ---
 
 ## SnapshotDelta (Server → Client)
@@ -328,8 +330,8 @@ Contains **full world state** for a given server tick. Sent unreliable at 60Hz.
 └─────────────────────────────────────────────────────────────┘
 
 Header size: 14 bytes
-Per entity: 26 bytes
-Total (10 entities): 14 + (10 × 26) = 274 bytes
+Per entity: 30 bytes
+Total (10 entities): 14 + (10 × 30) = 314 bytes
 ```
 
 ### EntityState Structure
@@ -352,9 +354,13 @@ Total (10 entities): 14 + (10 × 26) = 274 bytes
 │ VelY           │ short  │ 2    │ 21     │ Y velocity (quant)│
 │ SpeedQ         │ ushort │ 2    │ 23     │ Speed (quant)     │
 │ EventFlags     │ byte   │ 1    │ 25     │ CC/blink/dash     │
+│ Cd0            │ byte   │ 1    │ 26     │ Ability 0 cooldown│
+│ Cd1            │ byte   │ 1    │ 27     │ Ability 1 cooldown│
+│ Cd2            │ byte   │ 1    │ 28     │ Ability 2 cooldown│
+│ Cd3            │ byte   │ 1    │ 29     │ Ability 3 cooldown│
 └─────────────────────────────────────────────────────────────┘
 
-Total: 26 bytes per entity
+Total: 30 bytes per entity
 ```
 
 ### Position Quantization (16-bit)
@@ -513,6 +519,45 @@ Encode: SpeedQ = 8.0 × 10 = 80
 Decode: speed = 80 / 10 = 8.0  (exact)
 ```
 
+### Cooldown Quantization (8-bit)
+
+**Range:** 0-60 seconds
+**Precision:** 60 / 255 ≈ 0.24 seconds
+**Encoding:** Each ability slot (0-3) is quantized to a byte.
+
+```csharp
+byte QuantizeCooldown(float[] cooldowns, int slot)
+{
+    if (cooldowns == null || slot >= cooldowns.Length) return 0;
+    float cd = cooldowns[slot];
+    if (cd <= 0f) return 0;
+    return (byte)Mathf.Clamp(cd / 60f * 255f, 1, 255);
+}
+```
+
+**Decoding:**
+
+```csharp
+float GetCooldown(int slot) => slot switch
+{
+    0 => Cd0 / 255f * 60f,
+    1 => Cd1 / 255f * 60f,
+    2 => Cd2 / 255f * 60f,
+    3 => Cd3 / 255f * 60f,
+    _ => 0f
+};
+```
+
+**Example:**
+
+```
+Input:  cooldown = 10.0 seconds
+Encode: Cd0 = 10.0 / 60.0 × 255 = 42
+Decode: cd = 42 / 255 × 60 = 9.88s  (±0.12s, acceptable for UI)
+```
+
+**Note:** Cooldowns > 60s are clamped. Value 0 = ability ready, value 1-255 = on cooldown.
+
 ### Entity Flags
 
 ```csharp
@@ -650,8 +695,8 @@ var cmd = GameCommand.MoveChange(seq: 43, direction: new Vector2(0, 1));
 // Stop moving
 var cmd = GameCommand.MoveStop(seq: 44);
 
-// Dash
-var cmd = GameCommand.Dash(seq: 45, direction: new Vector2(1, 0));
+// Jump (discrete event — server computes velocity from SimConfig)
+var cmd = GameCommand.Jump(seq: 45);
 ```
 
 #### Ability Commands
@@ -673,11 +718,8 @@ var cmd = GameCommand.CastAbility(
     targetEntityId: 123
 );
 
-// Launch (dash/jump with velocity)
-var cmd = GameCommand.Launch(
-    seq: 52,
-    velocity: new Vector3(10, 5, 0)  // Forward and up
-);
+// Jump (discrete movement event, server-authoritative velocity)
+var cmd = GameCommand.Jump(seq: 52);
 ```
 
 #### Attack Commands
@@ -714,6 +756,71 @@ var cmd = GameCommand.SwapItems(seq: 73, fromSlot: 1, toSlot: 3);
 
 ---
 
+## ReliableEvent (Server → Client)
+
+### Purpose
+
+Critical game state changes requiring guaranteed delivery: spawns, deaths, ability casts, respawns, AOI transitions.
+
+**File:** `Assets/Scripts/Network/NetAdapter/Messages/ReliableEvent.cs`
+
+### Structure
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Field          │ Type   │ Size │ Offset │ Description       │
+├─────────────────────────────────────────────────────────────┤
+│ ServerTick     │ uint   │ 4    │ 0      │ Tick when occurred│
+│ Type           │ byte   │ 1    │ 4      │ EventType enum    │
+│ EntityId       │ uint   │ 4    │ 5      │ Primary entity    │
+│ Data1          │ uint   │ 4    │ 9      │ Context-dependent │
+│ Data2          │ uint   │ 4    │ 13     │ Context-dependent │
+└─────────────────────────────────────────────────────────────┘
+
+Total: 17 bytes (fixed size)
+```
+
+### Event Types
+
+| Type | Value | Data1 | Data2 | Purpose |
+|------|-------|-------|-------|---------|
+| `EntitySpawn` | 10 | Encoded position (X<<16\|Z) | ClientId<<8 \| TeamId | Player spawned |
+| `EntityDeath` | 11 | KillerId | — | Entity died |
+| `EntityRespawn` | 12 | SpawnX (×100) | SpawnZ (×100) | Entity respawned |
+| `ClassAssign` | 26 | ClassId (byte) | — | Class selected |
+| `AbilityUsed` | 40 | Slot \| DirX<<16 | DirZ | Ability cast |
+| `DamageDealt` | 43 | AttackerId | Damage amount | Damage applied |
+| `EntityEnterAOI` | 14 | OwnerClientId | TeamId | Entered visibility |
+| `EntityLeaveAOI` | 15 | — | — | Left visibility |
+| `Ping` | 101 | Echo sequence | — | RTT measurement |
+
+### Data Encoding Examples
+
+**EntitySpawn:** Position encoded as 16-bit signed (0.01 unit precision)
+```csharp
+// Encode: X in high 16 bits, Z in low 16 bits of Data1
+short posX = (short)(spawnPos.x * 100f);
+short posZ = (short)(spawnPos.z * 100f);
+uint encodedPos = (uint)(((posX & 0xFFFF) << 16) | (posZ & 0xFFFF));
+
+// Data2: ClientId (24 bits) + TeamId (8 bits)
+uint data2 = ((uint)ownerClientId << 8) | teamId;
+```
+
+**AbilityUsed:** Slot in low byte, direction quantized (×127)
+```csharp
+// Encode
+uint data1 = (uint)((slot & 0xFF) | (((ushort)(dir.x * 127f)) << 16));
+uint data2 = (uint)(ushort)(dir.z * 127f);
+
+// Decode
+byte slot = (byte)(evt.Data1 & 0xFF);
+short dirX = (short)(evt.Data1 >> 16);
+short dirZ = (short)(evt.Data2 & 0xFFFF);
+```
+
+---
+
 ## Quantization Summary Table
 
 | Data Type | Range | Precision | Encoding | Storage |
@@ -725,6 +832,7 @@ var cmd = GameCommand.SwapItems(seq: 73, fromSlot: 1, toSlot: 3);
 | **Rotation** | 0-360° | 0.0055° | 16-bit normalized | ushort (2 bytes) |
 | **Velocity** | ±327.67 u/s | 0.01 u/s | ×100 | short (2 bytes) |
 | **Speed** | 0-6553.5 u/s | 0.1 u/s | ×10 | ushort (2 bytes) |
+| **Cooldown** | 0-60 seconds | ~0.24 seconds | ÷60 ×255 | byte (1 byte) |
 
 **Design Notes:**
 
@@ -739,23 +847,27 @@ var cmd = GameCommand.SwapItems(seq: 73, fromSlot: 1, toSlot: 3);
 
 ### InputPacket Bandwidth (Continuous Input)
 
-**Base packet:** 14 bytes (no commands)
-**With 3 redundant commands:** 14 + (3 × 14) = 56 bytes
+**Base packet (movement only):** 14 bytes
+**With 3 redundant event commands:** 14 + (3 × 14) = 56 bytes
 **Send rate:** 120 packets/sec (max, continuous input)
-**Upload:** 56 × 120 = 6,720 bytes/sec ≈ **6.7 KB/s per client**
+
+```
+Typical (movement only): 14 × 120 = 1,680 bytes/sec ≈ 1.7 KB/s per client
+Worst case (with events):  56 × 120 = 6,720 bytes/sec ≈ 6.7 KB/s per client
+```
 
 ### SnapshotDelta Bandwidth (10 Entities)
 
 **Header:** 14 bytes
-**Entities:** 10 × 26 = 260 bytes
-**Total:** 274 bytes
+**Entities:** 10 × 30 = 300 bytes
+**Total:** 314 bytes
 **Send rate:** 60 snapshots/sec
-**Download:** 274 × 60 = 16,440 bytes/sec ≈ **16.4 KB/s per client**
+**Download:** 314 × 60 = 18,840 bytes/sec ≈ **18.8 KB/s per client**
 
 ### Server Total (10 Clients)
 
-**Incoming:** 6.7 KB/s × 10 = **67 KB/s** (536 Kbps)
-**Outgoing:** 16.4 KB/s × 10 = **164 KB/s** (1.3 Mbps)
+**Incoming:** 1.7–6.7 KB/s × 10 = **17–67 KB/s**
+**Outgoing:** 18.8 KB/s × 10 = **188 KB/s** (1.5 Mbps)
 
 **Negligible for modern connections.** Typical home broadband (10 Mbps up / 100 Mbps down) can handle 100+ clients.
 
@@ -794,33 +906,37 @@ All inputs received from clients must be validated to prevent cheating and bugs.
 
 #### Direction Validation (MoveDir)
 
-```csharp
-void OnMoveDirReceived(int clientId, uint seq, Vector2 dir, long timestamp)
-{
-    // Normalize if magnitude exceeds 1.0 (tolerance for quantization error)
-    if (dir.sqrMagnitude > 1.01f)
-        dir = dir.normalized;
+**File:** `ServerGameLoop.cs:748-773`
 
-    player.SetMoveDirection(new Vector3(dir.x, 0, dir.y));
+```csharp
+Vector3 dir3D = new Vector3(input.Payload.x, 0f, input.Payload.y);
+
+// Normalize if magnitude exceeds 1.0 (tolerance for quantization error)
+if (dir3D.sqrMagnitude > 1.01f)
+    dir3D = dir3D.normalized;
+
+// Reject zero direction (client should send Stop instead)
+if (dir3D.sqrMagnitude < 0.01f)
+{
+    Debug.LogWarning($"MoveDir with zero direction from client {clientId} - ignoring");
+    return false;
 }
+
+player.SetMoveDirection(dir3D);
 ```
 
 **Why tolerance?** Quantization can produce magnitude slightly > 1.0 (e.g., 1.0079).
+**Why reject zero?** Prevents ghost movement — client should use `Stop` intent instead.
 
 #### Position Validation (MoveTo)
 
+> **Note:** Position clamping is NOT currently implemented. `ServerGameLoop.ApplyMoveTo` passes the position directly to `player.SetMoveTarget()` without bounds checking. This is a TODO for anti-cheat hardening.
+
 ```csharp
-void OnMoveToReceived(int clientId, uint seq, Vector2 pos, long timestamp)
-{
-    // Clamp to map bounds
-    pos.x = Mathf.Clamp(pos.x, -100f, 100f);
-    pos.y = Mathf.Clamp(pos.y, -100f, 100f);
-
-    player.SetMoveTarget(new Vector3(pos.x, 0, pos.y));
-}
+// Current implementation (no validation):
+Vector3 target = new Vector3(input.Payload.x, 0f, input.Payload.y);
+player.SetMoveTarget(target);
 ```
-
-**Why clamp?** Prevents out-of-bounds positions from malicious/buggy clients.
 
 #### Sequence Validation
 
@@ -897,8 +1013,10 @@ Debug.Log($"[RECV] Client={clientId} seq={packet.MovementSeq} intent={packet.Int
 ```
 Assets/Scripts/Network/NetAdapter/Messages/
 ├── InputPacket.cs              # Client input format + quantization
-├── SnapshotDelta.cs            # Server snapshot format
-└── GameCommand.cs              # Discrete event format
+├── SnapshotDelta.cs            # Server snapshot format + EntityState
+├── GameCommand.cs              # Discrete event format
+├── ReliableEvent.cs            # Critical server→client events
+└── MatchConfigBroadcast.cs     # Match initialization broadcast
 
 Assets/Scripts/Network/Shared/
 └── CommandTypes.cs             # Shared enums (categories, actions)

@@ -6,6 +6,9 @@ using UnityEngine.UI;
 using UnityEditor;
 using TMPro;
 using MOBANet.Client.UI;
+using MOBANet.Client.Animation;
+using MOBANet.GameSim.Data;
+using MOBANet.UnityView.Core;
 
 /// <summary>
 /// Creates the HUD_Canvas GameObject hierarchy in the scene and optionally saves it as a prefab.
@@ -88,8 +91,7 @@ public class HUDCanvasCreator : Editor
         Selection.activeGameObject = canvasGo;
         Undo.RegisterCreatedObjectUndo(canvasGo, "Create HUD Canvas");
 
-        Debug.Log("[HUDCanvasCreator] HUD_Canvas created in scene. " +
-                  "Assign CharacterClass assets to HUDManager in Inspector, then save as prefab if needed.");
+        Debug.Log("[HUDCanvasCreator] HUD_Canvas created — CharacterClasses and NetworkClient auto-wired.");
     }
 
     [MenuItem("Ryvax/Create HUD Canvas (Save as Prefab)")]
@@ -255,6 +257,54 @@ public class HUDCanvasCreator : Editor
         var so = new SerializedObject(manager);
         so.FindProperty("abilityBar").objectReferenceValue = bar;
         so.FindProperty("classSelection").objectReferenceValue = classSel;
+
+        // Auto-discover NetworkClient in scene
+        var networkClient = Object.FindFirstObjectByType<NetworkClient>();
+        if (networkClient != null)
+        {
+            so.FindProperty("networkClient").objectReferenceValue = networkClient;
+            Debug.Log($"[HUDCanvasCreator] Auto-wired NetworkClient: {networkClient.gameObject.name}");
+        }
+        else
+        {
+            Debug.LogWarning("[HUDCanvasCreator] No NetworkClient found in scene — assign manually.");
+        }
+
+        // Auto-discover CharacterClass assets and build array indexed by classType
+        var guids = AssetDatabase.FindAssets("t:CharacterClass");
+        int maxIndex = 0;
+        var classAssets = new System.Collections.Generic.List<(int index, CharacterClass asset)>();
+        foreach (var guid in guids)
+        {
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            var cc = AssetDatabase.LoadAssetAtPath<CharacterClass>(path);
+            if (cc != null)
+            {
+                int idx = (int)cc.classType;
+                if (idx > maxIndex) maxIndex = idx;
+                classAssets.Add((idx, cc));
+                Debug.Log($"[HUDCanvasCreator] Found CharacterClass: {cc.className} (type={cc.classType}, index={idx})");
+            }
+        }
+
+        if (classAssets.Count > 0)
+        {
+            var prop = so.FindProperty("characterClasses");
+            prop.arraySize = maxIndex + 1;
+            // Clear all slots first
+            for (int i = 0; i <= maxIndex; i++)
+                prop.GetArrayElementAtIndex(i).objectReferenceValue = null;
+            // Assign each class at its enum index
+            foreach (var (idx, asset) in classAssets)
+                prop.GetArrayElementAtIndex(idx).objectReferenceValue = asset;
+
+            Debug.Log($"[HUDCanvasCreator] Auto-wired {classAssets.Count} CharacterClass asset(s) (array size={maxIndex + 1})");
+        }
+        else
+        {
+            Debug.LogWarning("[HUDCanvasCreator] No CharacterClass assets found in project.");
+        }
+
         so.ApplyModifiedPropertiesWithoutUndo();
     }
 

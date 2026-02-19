@@ -190,8 +190,8 @@ Debug.Log($"IsAiming: {isAiming}");
 ## Documentation
 
 For complete system documentation, see:
-- **`/Assets/Character/Shared/Animations/ANIMATION_SYSTEM.md`** - Full system overview
-- **`/Assets/Character/Shared/Animations/PARAMETERS_REFERENCE.md`** - Complete parameter reference
+- **`/Assets/Character/Shared/Animations/01_Animation_System.md`** - Full system overview
+- **`/Assets/Character/Shared/Animations/02_Parameters_Reference.md`** - Complete parameter reference
 - **`/Assets/Character/Class/Archer/README.md`** - Archer-specific documentation
 
 ## Integration Status

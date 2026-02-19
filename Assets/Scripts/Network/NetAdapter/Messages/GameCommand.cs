@@ -113,25 +113,9 @@ namespace MOBANet.NetAdapter.Messages
         }
 
         /// <summary>
-        /// Create a dash command with direction
+        /// Create a jump command (discrete event, no data — server computes velocity from SimConfig)
         /// </summary>
-        public static GameCommand Dash(uint seq, Vector2 direction)
-        {
-            return new GameCommand
-            {
-                Sequence = seq,
-                Category = CommandCategory.Movement,
-                Action = MovementAction.Dash,
-                Data0 = QuantizeDirection(direction.x),
-                Data1 = QuantizeDirection(direction.y),
-                Data2 = 0
-            };
-        }
-
-        /// <summary>
-        /// Create a jump command
-        /// </summary>
-/*         public static GameCommand Jump(uint seq)
+        public static GameCommand Jump(uint seq)
         {
             return new GameCommand
             {
@@ -142,7 +126,7 @@ namespace MOBANet.NetAdapter.Messages
                 Data1 = 0,
                 Data2 = 0
             };
-        } */
+        }
 
         #endregion
 
@@ -177,23 +161,6 @@ namespace MOBANet.NetAdapter.Messages
                 Data0 = 0,
                 Data1 = 0,
                 Data2 = 0
-            };
-        }
-
-        /// <summary>
-        /// Launch ability (dash/jump spells) - envoie vélocité 3D au serveur.
-        /// Data0 = velocityX (quantized, precision 0.1), Data1 = velocityZ, Data2 = velocityY (16-bit low)
-        /// </summary>
-        public static GameCommand Launch(uint seq, Vector3 velocity)
-        {
-            return new GameCommand
-            {
-                Sequence = seq,
-                Category = CommandCategory.Ability,
-                Action = AbilityAction.Launch,
-                Data0 = QuantizePosition(velocity.x),
-                Data1 = QuantizePosition(velocity.z),
-                Data2 = (uint)(ushort)QuantizePosition(velocity.y)
             };
         }
 

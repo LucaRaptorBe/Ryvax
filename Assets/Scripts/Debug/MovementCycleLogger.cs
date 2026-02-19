@@ -72,7 +72,7 @@ namespace MOBANet.Diagnostics
                 else
                     payloadStr = $" target=({payload.Value.x:F1},{payload.Value.z:F1})";
             }
-            Debug.Log($"{Timestamp} [INTENT] {CycleTime} {intentType} seq={seqId}{payloadStr}");
+            // Debug.Log($"{Timestamp} [INTENT] {CycleTime} {intentType} seq={seqId}{payloadStr}");
         }
 
         /// <summary>

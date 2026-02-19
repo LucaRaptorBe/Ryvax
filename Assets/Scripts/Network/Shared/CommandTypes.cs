@@ -38,7 +38,7 @@ namespace MOBANet.Shared
         public const byte Start = 1;
         public const byte Change = 2;
         public const byte Stop = 3;
-        public const byte Dash = 4;
+        public const byte Jump = 5;
     }
 
     /// <summary>
@@ -52,7 +52,6 @@ namespace MOBANet.Shared
         public const byte CastR = 4;
         public const byte CastSummoner1 = 10;
         public const byte CastSummoner2 = 11;
-        public const byte Launch = 20;  // Sorts de mouvement (dash/jump) - envoie vélocité 3D
         public const byte Cancel = 99;
     }
 

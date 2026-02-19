@@ -1,6 +1,7 @@
 // HUDManager.cs - Bootstrap for the HUD system
 // Detects local player spawn, initializes ability bar, refreshes each frame
 // Manages ClassSelectionUI → sends GameCommand.ClassSelect on selection
+// Routes AbilityUsed events to ability bar for smooth cooldown countdown
 
 using UnityEngine;
 using MOBANet.GameSim.Data;
@@ -8,7 +9,9 @@ using MOBANet.GameSim.Entities;
 using MOBANet.NetAdapter.Messages;
 using MOBANet.UnityView.Core;
 using MOBANet.UnityView.Entities;
+using MOBANet.UnityView.Input;
 using MOBANet.Client.Animation;
+using MOBANet.Client.HUD;
 
 namespace MOBANet.Client.UI
 {
@@ -16,6 +19,7 @@ namespace MOBANet.Client.UI
     /// Bootstraps the HUD. Detects the local player, initializes the ability bar
     /// with the correct CharacterClass, and refreshes cooldowns each frame.
     /// Also manages the class selection screen before spawn.
+    /// Routes AbilityUsed events → AbilityBarUI.StartCooldown for smooth sweep.
     /// </summary>
     public class HUDManager : MonoBehaviour
     {
@@ -33,21 +37,24 @@ namespace MOBANet.Client.UI
         private SimPlayer _cachedSimPlayer;
         private bool _initialized;
         private bool _classSelectionShown;
+        private TargetInfoUI _targetInfoUI;
 
         void OnEnable()
         {
             if (classSelection != null)
-            {
                 classSelection.OnClassSelected += OnClassSelected;
-            }
+
+            if (networkClient != null)
+                networkClient.OnAbilityCast += OnAbilityCast;
         }
 
         void OnDisable()
         {
             if (classSelection != null)
-            {
                 classSelection.OnClassSelected -= OnClassSelected;
-            }
+
+            if (networkClient != null)
+                networkClient.OnAbilityCast -= OnAbilityCast;
         }
 
         void Update()
@@ -82,7 +89,7 @@ namespace MOBANet.Client.UI
 
         private void OnClassSelected(int classId)
         {
-            Debug.Log($"[HUDManager] OnClassSelected classId={classId}, networkClient={networkClient != null}");
+            // Debug.Log($"[HUDManager] OnClassSelected classId={classId}, networkClient={networkClient != null}");
             if (networkClient == null) return;
 
             var cmd = GameCommand.ClassSelect(0, (byte)classId);
@@ -92,10 +99,25 @@ namespace MOBANet.Client.UI
             classSelection?.Hide();
         }
 
+        /// <summary>
+        /// Called when any player casts an ability.
+        /// Only starts cooldown if it's the local player.
+        /// </summary>
+        private void OnAbilityCast(uint entityId, byte slot)
+        {
+            if (!_initialized) return;
+            if (networkClient == null) return;
+
+            // Only start cooldown for local player's abilities
+            if (entityId != networkClient.LocalEntityId) return;
+
+            abilityBar.StartCooldown(slot);
+        }
+
         private void TryInitialize()
         {
             var localPlayer = GameManager.Instance?.GetLocalPlayer();
-            if (localPlayer == null) { Debug.Log("[HUDManager] TryInit: no local player"); return; }
+            if (localPlayer == null) { return; }
 
             var playerView = localPlayer.GetComponent<PlayerView>();
             if (playerView == null) { Debug.Log("[HUDManager] TryInit: no PlayerView"); return; }
@@ -107,6 +129,17 @@ namespace MOBANet.Client.UI
             CharacterClass charClass = GetCharacterClass(_cachedSimPlayer.ClassId);
             Debug.Log($"[HUDManager] TryInit: ClassId={_cachedSimPlayer.ClassId}, charClass={charClass?.className ?? "NULL"}, classes={characterClasses?.Length ?? 0}");
             abilityBar.Initialize(charClass, _cachedSimPlayer);
+
+            // Initialize target info UI
+            var inputCollector = localPlayer.GetComponent<InputCollector>();
+            if (inputCollector != null && inputCollector.TargetingSystem != null && _targetInfoUI == null)
+            {
+                var targetInfoGO = new GameObject("TargetInfoUI");
+                targetInfoGO.transform.SetParent(transform);
+                _targetInfoUI = targetInfoGO.AddComponent<TargetInfoUI>();
+                _targetInfoUI.Initialize(inputCollector.TargetingSystem, networkClient, transform);
+            }
+
             _initialized = true;
             Debug.Log("[HUDManager] Ability bar initialized!");
         }

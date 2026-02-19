@@ -8,8 +8,7 @@ This documentation covers the complete network architecture for Ryvax, implement
 
 **For new developers:**
 1. Start here → Read [Architecture/01_System_Overview.md](Architecture/01_System_Overview.md) for high-level understanding
-2. Understand the philosophy → [Architecture/03_Design_Rationale.md](Architecture/03_Design_Rationale.md)
-3. Dive into specific components → Navigate folders below
+2. Dive into specific components → Navigate folders below
 
 **Current Performance:** ~50ms input-to-visual latency (localhost, 120Hz input rate)
 
@@ -20,16 +19,14 @@ This documentation covers the complete network architecture for Ryvax, implement
 ### 📐 Architecture
 High-level system design and architectural decisions.
 
-- **[01_System_Overview.md](Architecture/01_System_Overview.md)** - Component diagram and file references
-- **[02_LoL_Style_Netcode.md](Architecture/02_LoL_Style_Netcode.md)** - Complete LoL-style implementation guide
-- **[03_Design_Rationale.md](Architecture/03_Design_Rationale.md)** - Why this architecture? (vs FPS-style)
+- **[01_System_Overview.md](Architecture/01_System_Overview.md)** - Component diagram, namespaces, data flow, design rationale
 
 ### 🎮 GameSim
 Simulation layer (authoritative, deterministic, depends on UnityEngine for Vector3/Mathf).
 
-- **[GameSim_Overview.md](GameSim/GameSim_Overview.md)** - SimWorld, tick system, determinism
-- **[Command_System.md](GameSim/Command_System.md)** - CommandDispatcher, handlers, command flow
-- **[Entity_Model.md](GameSim/Entity_Model.md)** - SimPlayer, SimEntity, state components
+- **[01_GameSim_Overview.md](GameSim/01_GameSim_Overview.md)** - SimWorld, tick system, determinism
+- **[02_Command_System.md](GameSim/02_Command_System.md)** - CommandDispatcher, handlers, command flow
+- **[03_Entity_Model.md](GameSim/03_Entity_Model.md)** - SimPlayer, SimEntity, state components
 
 ### 🌐 Network
 FishNet adapter layer, message formats, and data flow.
@@ -42,40 +39,21 @@ FishNet adapter layer, message formats, and data flow.
 ### 🖥️ Server
 Server-side game loop and optimization systems.
 
-- **[Server_Loop.md](Server/Server_Loop.md)** - ServerGameLoop, tick rate, input buffering
-- **[AOI_System.md](Server/AOI_System.md)** - Area of Interest, visibility culling, bandwidth optimization
+- **[01_Server_Loop.md](Server/01_Server_Loop.md)** - ServerGameLoop, tick rate, input buffering
+- **[02_AOI_System.md](Server/02_AOI_System.md)** - Area of Interest, visibility culling, bandwidth optimization
 
 ### 💻 Client
 Client-side architecture and input handling.
 
-- **[Client_Architecture.md](Client/Client_Architecture.md)** - NetworkClient, sync, visual smoothing
-- **[Input_System.md](Client/Input_System.md)** - InputCollector, IntentBuilder, input flow
+- **[01_Client_Architecture.md](Client/01_Client_Architecture.md)** - NetworkClient, sync, visual smoothing
+- **[02_Input_System.md](Client/02_Input_System.md)** - InputCollector, IntentBuilder, input flow
 
 ### 🔧 Development
 Debugging, testing, and instrumentation guides.
 
-- **[Debugging_Guide.md](Development/Debugging_Guide.md)** - How to debug netcode issues
-- **[Instrumentation.md](Development/Instrumentation.md)** - Log formats, sequence correlation
-- **[Testing_Checklist.md](Development/Testing_Checklist.md)** - Manual testing procedures
-
-### 📦 Archive
-Historical debugging documents (for reference only).
-
-Contains investigative docs from latency optimization work. See [Archive/README.md](Archive/README.md) for details:
-- FLUSH_DELAY_INSTRUMENTATION.md
-- TUGBOAT_POLL_CHAIN.md
-- FIX_INCOMING_PROCESSING.md
-- FIX_CLIENT_OUTGOING.md
-- FIX_LATEUPDATE_FLUSH.md
-- CLIENT_OUTGOING_CHAIN.md
-- NETCODE_DIAGRAM.md
-- ENHANCED_SOCKET_LOGS.md
-- LOL_STYLE_NETCODE.md (V2.3)
-- LOL.md
-- InputCommandSpec.md
-- FLUX_DIAGRAM_VISUEL.md
-- NETCODE_FLOW_AS_IS.md
-- NETCODE_INPUT_LATENCY.md
+- **[01_Debugging_Guide.md](Development/01_Debugging_Guide.md)** - How to debug netcode issues
+- **[02_Instrumentation.md](Development/02_Instrumentation.md)** - Log formats, sequence correlation
+- **[03_Testing_Checklist.md](Development/03_Testing_Checklist.md)** - Manual testing procedures
 
 ---
 
@@ -86,19 +64,20 @@ Contains investigative docs from latency optimization work. See [Archive/README.
 - Client sends only **intents** (MoveTo, Stop, Follow), never position/velocity
 - All simulation (collisions, combat, RNG) happens server-side
 
-### LoL-Style Netcode
+### LoL-Style Netcode (V5.0)
 - **No client-side prediction** of position (unlike FPS games)
-- **Interpolation-based** rendering from server snapshots
-- **Visual smoothing** via offset correction (not rollback/replay)
-- **Immediate feedback** via rotation/animation (local intent)
+- **Dead-reckoning** from server snapshots (not interpolation buffer)
+- **Snap smoothing** via `Vector3.Lerp` toward dead-reckoned position
+- Rotation and animation derived from server velocity (no local intent feedback)
 
 ### Visual Formula
 ```
-visualPos = basePos + visualOffset
+deadReckonedPos = lastServerPos + lastServerVel * timeSinceSnapshot
+visualPos = Lerp(visualPos, deadReckonedPos, VISUAL_SMOOTHING_SPEED * dt)
 ```
-- `basePos`: Interpolated from server snapshots (delayed truth)
-- `visualOffset`: Absorption offset for visual continuity (corrects toward 0)
-- `visualPos`: Final rendered position
+- `deadReckonedPos`: Extrapolated from last server snapshot
+- `visualPos`: Smoothly approaches dead-reckoned position (snaps directly when stopped)
+- `VISUAL_SMOOTHING_SPEED = 18` (`NetcodeConstants.cs:92`)
 
 ---
 
@@ -126,16 +105,18 @@ Assets/Scripts/Network/Shared/NetcodeConstants.cs           - Network constants
 
 **Server:**
 ```
-Assets/Scripts/Server/ServerGameLoop.cs:909    - Authoritative simulation
-Assets/Scripts/Server/AOI/AOIManager.cs        - Visibility culling
+Assets/Scripts/Server/ServerGameLoop.cs            - Authoritative simulation loop
+Assets/Scripts/Server/ServerLauncher.cs            - Server initialization
+Assets/Scripts/Network/NetAdapter/AOI/AOIManager.cs - Visibility culling
 ```
 
 **Client:**
 ```
-Assets/Scripts/Core/NetworkClient.cs:482           - Client sync
+Assets/Scripts/Core/NetworkClient.cs               - Client sync, snapshot dispatch
 Assets/Scripts/Client/Input/InputCollector.cs      - Input capture
 Assets/Scripts/Client/Input/IntentBuilder.cs       - Intent construction (120Hz)
-Assets/Scripts/Client/View/PlayerView.cs           - Entity rendering
+Assets/Scripts/Client/View/Entities/EntityView.cs  - Dead-reckoning rendering
+Assets/Scripts/Client/View/Entities/PlayerView.cs  - Player-specific rendering
 ```
 
 ---
@@ -144,11 +125,12 @@ Assets/Scripts/Client/View/PlayerView.cs           - Entity rendering
 
 | Parameter | Value | File |
 |-----------|-------|------|
-| Server tick rate | 60Hz (16.67ms) | SimConfig.cs |
-| Snapshot rate | 60Hz | NetcodeConstants.cs:50 |
-| Input send rate | 120Hz (8.3ms) | NetworkClient.cs:54 |
+| Server tick rate | 60Hz (16.67ms) | NetcodeConstants.cs:23 |
+| Snapshot rate | 60Hz (= TICK_RATE) | NetcodeConstants.cs:29 |
+| Input send rate | 120Hz (8.3ms) | NetworkClient.cs:43 |
 | Intent rate-limit | 120Hz (8.3ms) | IntentBuilder.cs:37 |
-| Player speed | 8 u/s | NetcodeConstants.cs:56 |
+| Player speed | 8 u/s | NetcodeConstants.cs:34 |
+| Visual smoothing | 18 | NetcodeConstants.cs:92 |
 | Input→visual latency | ~50ms (localhost) | See Network/04_Performance_Metrics.md |
 
 ---
@@ -170,5 +152,5 @@ Assets/Scripts/Client/View/PlayerView.cs           - Entity rendering
 
 ---
 
-**Last Updated:** 2026-02-03
+**Last Updated:** 2026-02-18
 **Maintained By:** Ryvax Development Team

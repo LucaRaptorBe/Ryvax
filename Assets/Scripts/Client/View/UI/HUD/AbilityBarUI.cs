@@ -1,5 +1,6 @@
 // AbilityBarUI.cs - Container for 4 ability slots (Q/W/E/R)
 // Initializes slots from CharacterClass data, refreshes cooldowns each frame
+// StartCooldown() called from AbilityUsed event for smooth countdown
 
 using UnityEngine;
 using MOBANet.GameSim.Data;
@@ -58,7 +59,21 @@ namespace MOBANet.Client.UI
         }
 
         /// <summary>
+        /// Start cooldown on a specific slot from AbilityUsed event.
+        /// Uses the base cooldown from the ability definition.
+        /// </summary>
+        public void StartCooldown(int slot)
+        {
+            if (!_initialized) return;
+            if (slot < 0 || slot >= slots.Length || slots[slot] == null) return;
+            if (_baseCooldowns[slot] <= 0f) return;
+
+            slots[slot].StartCooldown(_baseCooldowns[slot]);
+        }
+
+        /// <summary>
         /// Refresh cooldown displays from SimPlayer state. Call each frame.
+        /// Snapshot values only correct drift — local countdown drives the display.
         /// </summary>
         public void Refresh(SimPlayer simPlayer)
         {

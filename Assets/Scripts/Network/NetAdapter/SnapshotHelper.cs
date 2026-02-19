@@ -134,9 +134,10 @@ namespace MOBANet.NetAdapter
                     player.Stats.Health,
                     (byte)entity.State,
                     player.Stats.IsAlive,
-                    player.Transform.Velocity,
+                    player.Transform.EffectiveVelocity,
                     effectiveSpeed,
-                    eventFlags
+                    eventFlags,
+                    player.Abilities.Cooldowns
                 );
             }
 

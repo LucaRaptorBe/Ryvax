@@ -2,7 +2,7 @@
 
 Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 
-**Dernière mise à jour:** 2026-02-04
+**Dernière mise à jour:** 2026-02-18
 
 ---
 
@@ -11,9 +11,7 @@ Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 | Objectif | Document |
 |----------|----------|
 | Comprendre l'architecture | [Architecture/01_System_Overview.md](Architecture/01_System_Overview.md) |
-| Comprendre le netcode LoL-style | [Architecture/02_LoL_Style_Netcode.md](Architecture/02_LoL_Style_Netcode.md) |
-| Débugger un problème | [Development/Debugging_Guide.md](Development/Debugging_Guide.md) |
-| Voir le status d'implémentation | [/IMPLEMENTATION_STATUS.md](/IMPLEMENTATION_STATUS.md) |
+| Débugger un problème | [Development/01_Debugging_Guide.md](Development/01_Debugging_Guide.md) |
 
 ---
 
@@ -22,9 +20,7 @@ Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 ### Architecture
 | Fichier | Description |
 |---------|-------------|
-| [01_System_Overview.md](Architecture/01_System_Overview.md) | Vue d'ensemble des composants |
-| [02_LoL_Style_Netcode.md](Architecture/02_LoL_Style_Netcode.md) | Implémentation netcode LoL-style |
-| [03_Design_Rationale.md](Architecture/03_Design_Rationale.md) | Pourquoi cette architecture |
+| [01_System_Overview.md](Architecture/01_System_Overview.md) | Vue d'ensemble des composants, namespaces, data flow |
 
 ### Network
 | Fichier | Description |
@@ -37,28 +33,28 @@ Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 ### Server
 | Fichier | Description |
 |---------|-------------|
-| [Server_Loop.md](Server/Server_Loop.md) | Boucle serveur, tick rate |
-| [AOI_System.md](Server/AOI_System.md) | Area of Interest, visibilité |
+| [01_Server_Loop.md](Server/01_Server_Loop.md) | Boucle serveur, tick rate |
+| [02_AOI_System.md](Server/02_AOI_System.md) | Area of Interest, visibilité |
 
 ### Client
 | Fichier | Description |
 |---------|-------------|
-| [Client_Architecture.md](Client/Client_Architecture.md) | NetworkClient, visual smoothing |
-| [Input_System.md](Client/Input_System.md) | InputCollector, IntentBuilder |
+| [01_Client_Architecture.md](Client/01_Client_Architecture.md) | NetworkClient, visual smoothing |
+| [02_Input_System.md](Client/02_Input_System.md) | InputCollector, IntentBuilder |
 
 ### GameSim
 | Fichier | Description |
 |---------|-------------|
-| [GameSim_Overview.md](GameSim/GameSim_Overview.md) | SimWorld, tick system |
-| [Command_System.md](GameSim/Command_System.md) | CommandDispatcher, handlers |
-| [Entity_Model.md](GameSim/Entity_Model.md) | SimPlayer, états |
+| [01_GameSim_Overview.md](GameSim/01_GameSim_Overview.md) | SimWorld, tick system |
+| [02_Command_System.md](GameSim/02_Command_System.md) | CommandDispatcher, handlers |
+| [03_Entity_Model.md](GameSim/03_Entity_Model.md) | SimPlayer, états |
 
 ### Development
 | Fichier | Description |
 |---------|-------------|
-| [Debugging_Guide.md](Development/Debugging_Guide.md) | Guide de débugage |
-| [Instrumentation.md](Development/Instrumentation.md) | Logs, corrélation |
-| [Testing_Checklist.md](Development/Testing_Checklist.md) | Procédures de test |
+| [01_Debugging_Guide.md](Development/01_Debugging_Guide.md) | Guide de débugage |
+| [02_Instrumentation.md](Development/02_Instrumentation.md) | Logs, corrélation |
+| [03_Testing_Checklist.md](Development/03_Testing_Checklist.md) | Procédures de test |
 
 ---
 
@@ -68,8 +64,8 @@ Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 | Fichier | Description |
 |---------|-------------|
 | [/Assets/Character/README.md](/Assets/Character/README.md) | Vue d'ensemble personnages |
-| [/Assets/Character/Shared/Animations/ANIMATION_SYSTEM.md](/Assets/Character/Shared/Animations/ANIMATION_SYSTEM.md) | Architecture animation multi-layer |
-| [/Assets/Character/Shared/Animations/PARAMETERS_REFERENCE.md](/Assets/Character/Shared/Animations/PARAMETERS_REFERENCE.md) | Référence paramètres (8 classes) |
+| [/Assets/Character/Shared/Animations/01_Animation_System.md](/Assets/Character/Shared/Animations/01_Animation_System.md) | Architecture animation multi-layer |
+| [/Assets/Character/Shared/Animations/02_Parameters_Reference.md](/Assets/Character/Shared/Animations/02_Parameters_Reference.md) | Référence paramètres (8 classes) |
 | [/Assets/Character/Shared/Animations/README.md](/Assets/Character/Shared/Animations/README.md) | Guide animations partagées |
 | [/Assets/Character/Shared/Animations/Editor/README.md](/Assets/Character/Shared/Animations/Editor/README.md) | HumanoidAnimatorBuilder |
 
@@ -90,18 +86,10 @@ Index complet de toute la documentation Ryvax, centralisée et colocalisée.
 
 | Fichier | Description |
 |---------|-------------|
-| [/IMPLEMENTATION_STATUS.md](/IMPLEMENTATION_STATUS.md) | Status d'implémentation animation |
-| [/ANIMATION_SYSTEM_SUMMARY.md](/ANIMATION_SYSTEM_SUMMARY.md) | Résumé système animation |
 | [/TROUBLESHOOTING.md](/TROUBLESHOOTING.md) | Guide dépannage |
 | [/claude.md](/claude.md) | Instructions AI assistant |
 
 ---
-
-## Archive
-
-Documentation historique (debugging, anciennes versions) dans [Archive/](Archive/).
-
-Voir [Archive/README.md](Archive/README.md) pour la liste complète.
 
 ---
 
@@ -115,7 +103,7 @@ Voir [Archive/README.md](Archive/README.md) pour la liste complète.
 | Flux réseau | `/Docs/Network/` | Data flow |
 | Guide développeur | `/Docs/Development/` | Debugging guide |
 | Doc technique d'un module | `README.md` dans le dossier | `/Assets/Character/README.md` |
-| Référence API/paramètres | Colocalisé avec le code | `PARAMETERS_REFERENCE.md` |
+| Référence API/paramètres | Colocalisé avec le code | `02_Parameters_Reference.md` |
 
 ### Règles
 

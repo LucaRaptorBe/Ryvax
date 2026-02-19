@@ -8,8 +8,8 @@ using MOBANet.GameSim.Entities;
 namespace MOBANet.GameSim.Commands.Handlers
 {
     /// <summary>
-    /// Handles movement commands: Start, Change, Stop, Dash.
-    /// Called when player presses/releases WASD keys.
+    /// Handles movement commands: Start, Change, Stop, Jump.
+    /// Called when player presses/releases WASD keys or presses Space.
     /// </summary>
     public class MovementHandler : ICommandHandler
     {
@@ -32,8 +32,9 @@ namespace MOBANet.GameSim.Commands.Handlers
                     // Debug.Log($"[MovementHandler] Player {player.Id} MoveStop");
                     break;
 
-                case MovementAction.Dash:
-                    // TODO: Implement dash ability
+                case MovementAction.Jump:
+                    float moveSpeed = config.PlayerMoveSpeed * player.Stats.MoveSpeedModifier;
+                    MovementEngine.ApplyJump(ref player.Transform, moveSpeed, config);
                     break;
             }
         }

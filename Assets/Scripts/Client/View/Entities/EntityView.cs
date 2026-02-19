@@ -39,6 +39,17 @@ namespace MOBANet.UnityView.Entities
     [DefaultExecutionOrder(100)]
     public class EntityView : MonoBehaviour
     {
+        #region Animator Hashes
+
+        private static readonly int StateHash = Animator.StringToHash("State");
+        private static readonly int SpeedHash = Animator.StringToHash("Speed");
+        private static readonly int IsGroundedHash = Animator.StringToHash("IsGrounded");
+        private static readonly int DeathHash = Animator.StringToHash("Death");
+        private static readonly int RespawnHash = Animator.StringToHash("Respawn");
+        private static readonly int HitHash = Animator.StringToHash("Hit");
+
+        #endregion
+
         #region Serialized Fields
 
         [Header("Entity Info")]
@@ -224,13 +235,13 @@ namespace MOBANet.UnityView.Entities
         {
             if (_animator == null) return;
 
-            _animator.SetInteger("State", _currentState);
+            _animator.SetInteger(StateHash, _currentState);
 
             float speed = _lastServerVel.magnitude;
-            _animator.SetFloat("Speed", speed);
+            _animator.SetFloat(SpeedHash, speed);
 
             bool isGrounded = transform.position.y <= 0.1f;
-            _animator.SetBool("IsGrounded", isGrounded);
+            _animator.SetBool(IsGroundedHash, isGrounded);
         }
 
         #endregion
@@ -243,7 +254,7 @@ namespace MOBANet.UnityView.Entities
 
             if (_animator != null)
             {
-                _animator.SetTrigger("Death");
+                _animator.SetTrigger(DeathHash);
             }
         }
 
@@ -255,7 +266,7 @@ namespace MOBANet.UnityView.Entities
 
             if (_animator != null)
             {
-                _animator.SetTrigger("Respawn");
+                _animator.SetTrigger(RespawnHash);
             }
         }
 
@@ -263,7 +274,7 @@ namespace MOBANet.UnityView.Entities
         {
             if (_animator != null)
             {
-                _animator.SetTrigger("Hit");
+                _animator.SetTrigger(HitHash);
             }
         }
 

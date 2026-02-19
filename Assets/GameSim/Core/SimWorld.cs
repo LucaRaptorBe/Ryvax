@@ -1,13 +1,12 @@
 // SimWorld.cs - Main simulation world containing all entities
 // PURE C# - No FishNet dependencies
-// Supports both input-based (legacy) and command-based simulation
 
 using System;
 using System.Collections.Generic;
 using UnityEngine;
 using MOBANet.GameSim.Entities;
-using MOBANet.GameSim.Input;
 using MOBANet.GameSim.Commands;
+using MOBANet.GameSim.Events;
 
 
 namespace MOBANet.GameSim.Core
@@ -15,8 +14,7 @@ namespace MOBANet.GameSim.Core
     /// <summary>
     /// Main simulation world.
     /// Contains all entities and handles simulation stepping.
-    /// Used by both server (authoritative) and client (prediction).
-    /// Supports both legacy input-based and new command-based systems.
+    /// Used by both server (authoritative) and client (local state tracking: cooldowns, health).
     /// </summary>
     public class SimWorld
     {
@@ -50,6 +48,8 @@ namespace MOBANet.GameSim.Core
         private readonly Dictionary<int, SimPlayer> _playersByClient = new();
         private readonly List<uint> _entitiesToRemove = new();
         private readonly List<SimEntity> _entitiesToAdd = new();
+        private readonly List<SimProjectile> _projectiles = new();
+        private readonly List<SimEvent> _eventQueue = new();
 
         // Spawn positions (injected from server or received from network)
         private Vector3[] _team1Spawns;
@@ -70,16 +70,26 @@ namespace MOBANet.GameSim.Core
         public event Action<uint, EntityType> OnEntityDestroyed;
 
         /// <summary>
-        /// Fired when a player takes damage
+        /// Raise a simulation event. Queued for drain by ServerGameLoop.
         /// </summary>
-#pragma warning disable 0067 // Event never used (reserved for future combat system)
-        public event Action<SimPlayer, int, uint> OnPlayerDamaged; // player, damage, sourceId
+        public void RaiseEvent(SimEvent evt)
+        {
+            _eventQueue.Add(evt);
+        }
 
         /// <summary>
-        /// Fired when a player dies
+        /// Drain all queued events and return them. Clears the internal queue.
+        /// Called by ServerGameLoop after ExecuteCommand() or Step().
         /// </summary>
-        public event Action<SimPlayer, uint> OnPlayerDied; // player, killerId
-#pragma warning restore 0067
+        public List<SimEvent> DrainEvents()
+        {
+            if (_eventQueue.Count == 0)
+                return null;
+
+            var events = new List<SimEvent>(_eventQueue);
+            _eventQueue.Clear();
+            return events;
+        }
 
         #endregion
 
@@ -211,105 +221,19 @@ namespace MOBANet.GameSim.Core
 
         #endregion
 
-        #region Simulation - Server
+        #region Projectile Management
 
         /// <summary>
-        /// SERVER: Step simulation with all client inputs.
-        /// This is the authoritative simulation.
+        /// Spawn a projectile (server-side only, not a networked entity)
         /// </summary>
-        public void Step(Dictionary<int, SimInput> clientInputs)
+        public void SpawnProjectile(SimProjectile proj)
         {
-            // Pre-tick (store previous state)
-            foreach (var entity in _entities.Values)
-            {
-                // PreTick removed - no longer needed in component-based architecture;
-            }
-
-            // Input is now applied via command handlers (MovementHandler, etc.)
-            // ApplyInput() removed - input state managed through GameCommand system
-
-            // Tick all entities
-            foreach (var entity in _entities.Values)
-            {
-                if (!entity.IsMarkedForRemoval)
-                {
-                    entity.Tick(Clock.TickDelta, Config);
-
-                    // Auto-attack is now ticked inside SimPlayer.Tick() via TickCombat()
-                    // TickAutoAttack() removed - combat logic integrated in component-based architecture
-                }
-            }
-
-            // Process collisions/interactions
-            ProcessCollisions();
-
-            // Add pending entities
-            foreach (var entity in _entitiesToAdd)
-            {
-                _entities[entity.Id] = entity;
-                OnEntitySpawned?.Invoke(entity);
-            }
-            _entitiesToAdd.Clear();
-
-            // Remove destroyed entities
-            ProcessRemovals();
-
-            // Advance tick
-            Clock.Advance();
+            _projectiles.Add(proj);
         }
 
         #endregion
 
-        #region Simulation - Client (Prediction)
-
-        /// <summary>
-        /// CLIENT: Step with local input only (for prediction).
-        /// Only simulates the local player, other entities use interpolation.
-        /// </summary>
-        public void StepLocal(int localClientId, in SimInput input)
-        {
-            // Pre-tick
-            foreach (var entity in _entities.Values)
-            {
-                // PreTick removed - no longer needed in component-based architecture;
-            }
-
-            // Input is now applied via command handlers
-            // ApplyInput() removed - input state managed through GameCommand system
-
-            // Tick all entities (for physics consistency)
-            foreach (var entity in _entities.Values)
-            {
-                if (!entity.IsMarkedForRemoval)
-                {
-                    entity.Tick(Clock.TickDelta, Config);
-                }
-            }
-
-            // Process removals
-            ProcessRemovals();
-
-            // Advance tick
-            Clock.Advance();
-        }
-
-        /// <summary>
-        /// CLIENT: Step prediction for local player only (minimal version)
-        /// </summary>
-        public void StepPrediction(int localClientId, in SimInput input)
-        {
-            if (_playersByClient.TryGetValue(localClientId, out var localPlayer))
-            {
-                // PreTick and ApplyInput removed - input handled via commands
-                localPlayer.Tick(Clock.TickDelta, Config);
-            }
-
-            Clock.Advance();
-        }
-
-        #endregion
-
-        #region Command-Based Simulation
+        #region Simulation
 
         /// <summary>
         /// Execute a command for a player.
@@ -327,9 +251,8 @@ namespace MOBANet.GameSim.Core
         }
 
         /// <summary>
-        /// COMMAND-BASED: Step simulation without per-tick inputs.
-        /// Commands are applied via ExecuteCommand() as they arrive.
-        /// This just advances the physics/state.
+        /// SERVER: Step simulation. Commands are applied via ExecuteCommand() as they arrive.
+        /// This advances physics/state.
         /// </summary>
         public void Step()
         {
@@ -351,6 +274,9 @@ namespace MOBANet.GameSim.Core
             // Process collisions/interactions
             ProcessCollisions();
 
+            // Tick projectiles (server-side only)
+            TickProjectiles(Clock.TickDelta);
+
             // Add pending entities
             foreach (var entity in _entitiesToAdd)
             {
@@ -363,21 +289,6 @@ namespace MOBANet.GameSim.Core
             ProcessRemovals();
 
             // Advance tick
-            Clock.Advance();
-        }
-
-        /// <summary>
-        /// CLIENT COMMAND-BASED: Step prediction for local player only.
-        /// Used after applying local command prediction.
-        /// </summary>
-        public void StepPrediction(int localClientId)
-        {
-            if (_playersByClient.TryGetValue(localClientId, out var localPlayer))
-            {
-                // PreTick removed - no longer needed in component-based architecture
-                localPlayer.Tick(Clock.TickDelta, Config);
-            }
-
             Clock.Advance();
         }
 
@@ -422,6 +333,60 @@ namespace MOBANet.GameSim.Core
 
         #endregion
 
+        #region Projectile Simulation
+
+        private void TickProjectiles(float dt)
+        {
+            for (int i = _projectiles.Count - 1; i >= 0; i--)
+            {
+                var proj = _projectiles[i];
+                proj.Tick(dt);
+
+                if (proj.IsExpired)
+                {
+                    _projectiles.RemoveAt(i);
+                    continue;
+                }
+
+                // Collision vs enemy players
+                foreach (var player in _playersByClient.Values)
+                {
+                    if (!player.Stats.IsAlive) continue;
+                    if (player.TeamId == proj.TeamId) continue;
+                    if (player.Id == proj.OwnerEntityId) continue;
+
+                    float dist = Vector3.Distance(proj.Position, player.Transform.Position);
+                    if (dist < proj.Radius + 0.5f) // 0.5 = player radius
+                    {
+                        player.TakeDamage((int)proj.Damage, proj.OwnerEntityId);
+
+                        RaiseEvent(new SimEvent
+                        {
+                            Type = SimEventType.DamageDealt,
+                            EntityId = player.Id,
+                            Data1 = proj.OwnerEntityId,
+                            Data2 = (uint)proj.Damage
+                        });
+
+                        if (player.Stats.IsDead)
+                        {
+                            RaiseEvent(new SimEvent
+                            {
+                                Type = SimEventType.EntityDeath,
+                                EntityId = player.Id,
+                                Data1 = proj.OwnerEntityId
+                            });
+                        }
+
+                        _projectiles.RemoveAt(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        #endregion
+
         #region Entity Removal
 
         private void ProcessRemovals()
@@ -445,6 +410,34 @@ namespace MOBANet.GameSim.Core
         // Note: Snapshot creation/application moved to NetAdapter layer
         // See: MOBANet.NetAdapter.SnapshotHelper
 
+        #region Respawn
+
+        /// <summary>
+        /// Respawn a player at their team spawn and raise EntityRespawn event.
+        /// Called by ServerGameLoop when respawn timer expires.
+        /// </summary>
+        public void RespawnPlayer(uint entityId)
+        {
+            var player = GetEntity<SimPlayer>(entityId);
+            if (player == null) return;
+
+            Vector3 spawnPos = GetSpawnPosition(player.TeamId, 0);
+            player.Respawn(spawnPos);
+
+            short posX = (short)(spawnPos.x * 100f);
+            short posZ = (short)(spawnPos.z * 100f);
+
+            RaiseEvent(new SimEvent
+            {
+                Type = SimEventType.EntityRespawn,
+                EntityId = entityId,
+                Data1 = (uint)(ushort)(posX & 0xFFFF),
+                Data2 = (uint)(ushort)(posZ & 0xFFFF)
+            });
+        }
+
+        #endregion
+
         #region World Management
 
         /// <summary>
@@ -456,6 +449,8 @@ namespace MOBANet.GameSim.Core
             _playersByClient.Clear();
             _entitiesToRemove.Clear();
             _entitiesToAdd.Clear();
+            _projectiles.Clear();
+            _eventQueue.Clear();
             Clock.Reset();
             SimEntity.ResetIdCounter();
         }

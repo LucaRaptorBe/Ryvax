@@ -2,7 +2,7 @@
 
 > **Status:** Production
 > **Version:** 5.0 (Pure LoL-style)
-> **Last Updated:** 2026-02-03
+> **Last Updated:** 2026-02-18
 
 ## Overview
 
@@ -55,7 +55,7 @@ Ryvax uses **unreliable UDP** for all time-sensitive data (inputs, snapshots) to
 
 **Transport:** Tugboat (LiteNetLib wrapper)
 **Protocol:** UDP with optional reliability per message
-**Default Port:** 7770
+**Default Port:** 7777
 
 #### Channel Selection
 
@@ -66,14 +66,14 @@ Ryvax uses **unreliable UDP** for all time-sensitive data (inputs, snapshots) to
 | `ReliableEvent` | Reliable | Yes | Critical events (spawn, death) need guaranteed delivery |
 | `MatchConfig` | Reliable | Yes | One-time setup must arrive |
 
-**Key Implementation:** `FishNetAdapter.cs:225-302`
+**Key Implementation:** `FishNetAdapter.cs:221-322`
 
 ```csharp
 // Unreliable for inputs (avoid head-of-line blocking)
 _networkManager.ClientManager.Broadcast(broadcast, Channel.Unreliable);
 
-// Reliable for critical events
-_networkManager.ServerManager.Broadcast(broadcast, false, Channel.Reliable);
+// Reliable for critical events (targeted to specific client)
+_networkManager.ServerManager.Broadcast(conn, broadcast, false, Channel.Reliable);
 ```
 
 ---
@@ -88,16 +88,26 @@ For **low-latency inputs**, we need to flush packets **immediately** within the 
 
 ### Solution: Manual Polling
 
-**File:** `FishNetAdapter.cs:562-629`
+**File:** `FishNetAdapter.cs:593-630`
 
 ```csharp
 public void ForceIterateOutgoing()
 {
-    // STEP 1: Flush PacketBundle → Transport queue
-    _networkManager.TransportManager.IterateOutgoing(asServer: false);
+    // Flush server outgoing (to clients)
+    if (_networkManager.IsServerStarted)
+    {
+        // STEP 1: Flush PacketBundle → Transport
+        _networkManager.TransportManager.IterateOutgoing(asServer: true);
+        // STEP 2: Flush Transport → Socket
+        _networkManager.TransportManager.Transport.IterateOutgoing(asServer: true);
+    }
 
-    // STEP 2: Flush Transport queue → OS socket
-    _networkManager.TransportManager.Transport.IterateOutgoing(asServer: false);
+    // Flush client outgoing (to server)
+    if (_networkManager.IsClientStarted)
+    {
+        _networkManager.TransportManager.IterateOutgoing(asServer: false);
+        _networkManager.TransportManager.Transport.IterateOutgoing(asServer: false);
+    }
 }
 ```
 
@@ -127,13 +137,15 @@ All messages implement `INetMessage` interface with versioning.
 | `InputPacket` | 10 | 4 | C→S | Unreliable | Player inputs with intent + events |
 | `SnapshotDelta` | 2 | 1 | S→C | Unreliable | World state (entities, physics) |
 | `GameCommand` | 4 | 1 | C→S | Unreliable | Discrete events (jump, cast) |
-| `ReliableEvent` | 5 | 1 | S→C | Reliable | Critical events (spawn, death) |
-| `MatchConfig` | 6 | 1 | S→C | Reliable | Match initialization |
+| `ReliableEvent` | 3 | 1 | S→C | Reliable | Critical events (spawn, death) |
+| `MatchConfig` | — | — | S→C | Reliable | Match initialization (direct IBroadcast, not INetMessage) |
 
 **Files:**
 - `Assets/Scripts/Network/NetAdapter/Messages/InputPacket.cs`
 - `Assets/Scripts/Network/NetAdapter/Messages/SnapshotDelta.cs`
 - `Assets/Scripts/Network/NetAdapter/Messages/GameCommand.cs`
+- `Assets/Scripts/Network/NetAdapter/Messages/ReliableEvent.cs`
+- `Assets/Scripts/Network/NetAdapter/Messages/MatchConfigBroadcast.cs`
 
 ---
 
@@ -147,7 +159,7 @@ By default, FishNet polls incoming/outgoing data during `TimeManager.OnTick()` (
 
 ### Solution: Manual Polling at Fixed Points
 
-**File:** `FishNetAdapter.cs:563-585`
+**File:** `FishNetAdapter.cs:571-585`
 
 ```csharp
 public void ForceIterateIncoming()
@@ -164,10 +176,10 @@ public void ForceIterateIncoming()
 
 **Usage:**
 
-- **Server:** Called at **START of FixedUpdate** to ensure inputs are buffered before simulation
-- **Client:** Called in **Update** to receive snapshots ASAP
+- **Server:** Called in **`Update()`** (every frame, 60-120 FPS) to receive inputs as early as possible, decoupled from simulation tick rate. See `ServerGameLoop.cs:237-243`.
+- **Client:** Not called explicitly — client relies on FishNet's default incoming polling. Client only calls `ForceIterateOutgoing()` in `LateUpdate()`.
 
-**Benefit:** Deterministic data arrival, eliminates race conditions between network and simulation.
+**Benefit:** Server receives inputs at frame rate rather than tick rate, reducing input latency.
 
 ---
 
@@ -198,12 +210,14 @@ public const int INPUT_BUFFER_SIZE = 8;       // Max history size
 **Bandwidth Cost:**
 
 ```
-Base packet: 14 bytes
-+ 3 redundant commands × 14 bytes = 56 bytes per packet
-× 120 packets/sec = ~6.7 KB/s upload per client
+Base intent packet: 14 bytes (no event commands)
++ event commands (if any): 3 redundant × 14 bytes = 42 bytes
+Max packet: 14 + 42 = 56 bytes (only when events are queued)
+Typical (movement only): 14 bytes × 120/sec = ~1.7 KB/s upload
+Worst case (continuous events): 56 bytes × 120/sec = ~6.7 KB/s upload
 ```
 
-For 10 clients: ~67 KB/s server incoming (negligible for modern servers).
+For 10 clients (typical): ~17 KB/s server incoming (negligible for modern servers).
 
 ### Snapshot Compression
 
@@ -212,12 +226,14 @@ For 10 clients: ~67 KB/s server incoming (negligible for modern servers).
 **Snapshot Size Calculation:**
 
 ```
-Header: 14 bytes
-+ 10 entities × 26 bytes = 274 bytes per snapshot
-× 60 snapshots/sec = ~16.4 KB/s download per client
+Header: 14 bytes (ServerTick + AckInputSeq + AckMovementSeq + EntityCount)
++ 10 entities × 30 bytes = 314 bytes per snapshot
+× 60 snapshots/sec = ~18.8 KB/s download per client
 ```
 
-For 10 clients: ~164 KB/s server outgoing.
+EntityState (30 bytes): EntityId(4) + EntityType(1) + Flags(1) + Pos XYZ(6) + RotY(2) + Health(2) + State(1) + Vel XYZ(6) + SpeedQ(2) + EventFlags(1) + Cd0-Cd3(4)
+
+For 10 clients: ~188 KB/s server outgoing.
 
 **Future Optimization:** Delta compression (send only changed entities).
 
@@ -244,6 +260,8 @@ if (packet.Version < InputPacket.MSG_VERSION)
     return;
 }
 ```
+
+> **Note (currently inert):** `InputPacket.Version` is a read-only property that always returns the compile-time constant `MSG_VERSION` (see `InputPacket.cs:53`: `public ushort Version => MSG_VERSION`). Because sender and receiver share the same binary, `packet.Version < InputPacket.MSG_VERSION` is always `false` and the guard never triggers. The check becomes meaningful only when a client running an older build connects to a server built with a newer version — a scenario that does not occur in the current single-binary setup. When client and server are shipped as separate binaries this check must be revisited.
 
 **Policy:** Clean break - no legacy path for old versions.
 
@@ -297,7 +315,7 @@ ServerGameLoop sends MatchConfig to client
 ServerGameLoop spawns player entity for clientId
 ```
 
-**File:** `FishNetAdapter.cs:363-419`
+**File:** `FishNetAdapter.cs:365-419`
 
 ---
 
@@ -313,7 +331,7 @@ The adapter supports three roles:
 
 **Host Mode Complexity:** `LocalClientId` requires special handling (client isn't in server's client list).
 
-**File:** `FishNetAdapter.cs:42-60, 188-198`
+**File:** `FishNetAdapter.cs:41-61, 188-198`
 
 ---
 
@@ -321,11 +339,16 @@ The adapter supports three roles:
 
 ### INetAdapter Contract
 
-**File:** `Assets/Scripts/Network/NetAdapter/INetAdapter.cs` (assumed interface)
+**File:** `Assets/Scripts/Network/NetAdapter/Interfaces/INetAdapter.cs`
 
 ```csharp
 public interface INetAdapter
 {
+    // State properties
+    NetworkRole Role { get; }
+    bool IsConnected { get; }
+    int LocalClientId { get; }
+
     // Lifecycle
     void StartServer(ushort port);
     void StartClient(string address, ushort port);
@@ -336,14 +359,11 @@ public interface INetAdapter
     void SendToServer<T>(T message, bool reliable) where T : struct, INetMessage;
     void SendToClient<T>(int clientId, T message, bool reliable) where T : struct, INetMessage;
     void SendToAll<T>(T message, bool reliable) where T : struct, INetMessage;
+    void SendMatchConfigToClient(int clientId, Vector3[] team1Spawns, Vector3[] team2Spawns);
 
     // Handlers
     void RegisterHandler<T>(Action<int, T> handler) where T : struct, INetMessage;
     void UnregisterHandler<T>() where T : struct, INetMessage;
-
-    // Manual polling (extension for FishNet)
-    void ForceIterateIncoming();
-    void ForceIterateOutgoing();
 
     // Events
     event Action<int> OnClientConnected;
@@ -351,14 +371,10 @@ public interface INetAdapter
     event Action OnServerStarted;
     event Action OnClientStarted;
     event Action OnDisconnected;
-
-    // Intent-specific events (V5.0)
-    event Action<int, uint, Vector2, long> OnMoveDirReceived;
-    event Action<int, uint, Vector2, long> OnMoveToReceived;
-    event Action<int, uint, long> OnStopReceived;
-    event Action<int, uint, uint, long> OnFollowReceived;
 }
 ```
+
+**Note:** `ForceIterateIncoming()`, `ForceIterateOutgoing()`, `SendInputPacket()`, and intent-specific events (`OnMoveDirReceived`, `OnMoveToReceived`, `OnStopReceived`, `OnFollowReceived`) are **FishNetAdapter-specific** methods, not part of the `INetAdapter` interface. Application code (`NetworkClient`, `ServerGameLoop`) uses the concrete `FishNetAdapter` type to access these.
 
 ---
 
@@ -366,7 +382,7 @@ public interface INetAdapter
 
 FishNet requires broadcast types to implement `IBroadcast`. The adapter wraps messages:
 
-**File:** `FishNetAdapter.cs:672-706`
+**File:** `FishNetAdapter.cs:672-707`
 
 ```csharp
 public struct SnapshotBroadcast : IBroadcast
@@ -394,7 +410,7 @@ These wrappers are **internal to FishNetAdapter** - application code works with 
 
 ### Solution: Sequence Tracking
 
-**File:** `FishNetAdapter.cs:432, 485-517`
+**File:** `FishNetAdapter.cs:432, 484-517`
 
 ```csharp
 private readonly Dictionary<int, uint> _lastProcessedSeq = new();
@@ -477,7 +493,7 @@ public const int INPUT_BUFFER_SIZE = 8;       // Max command history
 |---------|-------|---------|
 | TimeManager Tick Rate | 60 | Match `TICK_RATE` (though manual polling bypasses this) |
 | Transport | Tugboat | UDP transport |
-| Server Port | 7770 | Default port |
+| Server Port | 7777 | Default port |
 | Client Address | 127.0.0.1 | Localhost for testing |
 
 **Note:** Even though manual polling is used, TimeManager settings should match for consistency.
@@ -515,13 +531,14 @@ public const int INPUT_BUFFER_SIZE = 8;       // Max command history
 
 **Per Client (Continuous Input):**
 
-- **Upload:** ~6.7 KB/s (120 packets/sec × 56 bytes)
-- **Download:** ~16.4 KB/s (60 snapshots/sec × 274 bytes for 10 entities)
+- **Upload (movement only):** ~1.7 KB/s (120 packets/sec × 14 bytes)
+- **Upload (with events):** ~6.7 KB/s (120 packets/sec × 56 bytes max)
+- **Download:** ~18.8 KB/s (60 snapshots/sec × 314 bytes for 10 entities)
 
-**Server Total (10 Clients):**
+**Server Total (10 Clients, typical):**
 
-- **Incoming:** ~67 KB/s
-- **Outgoing:** ~164 KB/s
+- **Incoming:** ~17 KB/s (movement only) to ~67 KB/s (worst case)
+- **Outgoing:** ~188 KB/s
 
 **Negligible for modern connections.** Typical broadband can handle 100+ clients.
 
@@ -568,8 +585,9 @@ Logs are active in `UNITY_EDITOR` and `DEVELOPMENT_BUILD` (see code comments for
 ### General Network Limitations
 
 1. **No Delta Compression:** Snapshots send full entity states (future optimization).
-2. **No Interest Management:** All clients receive all entities (future: AOI filtering).
-3. **No Lag Compensation:** Server doesn't rewind for hit detection (acceptable for MOBA).
+2. **No Lag Compensation:** Server doesn't rewind for hit detection (acceptable for MOBA).
+
+> **Note:** AOI (Area of Interest) filtering is now implemented via `AOIManager` in `ServerGameLoop`. Each client receives only entities within their vision radius. See `ServerGameLoop.cs:52-53, 394-424`.
 
 ---
 
@@ -622,10 +640,18 @@ public class MirrorAdapter : MonoBehaviour, INetAdapter
 Assets/Scripts/Network/NetAdapter/
 ├── FishNet/
 │   └── FishNetAdapter.cs          # FishNet implementation (ONLY FishNet code)
+├── Interfaces/
+│   └── INetAdapter.cs             # Core adapter interface
 ├── Messages/
 │   ├── InputPacket.cs             # Client input messages
 │   ├── SnapshotDelta.cs           # Server state snapshots
-│   └── GameCommand.cs             # Discrete event commands
+│   ├── GameCommand.cs             # Discrete event commands
+│   ├── ReliableEvent.cs           # Critical server→client events
+│   └── MatchConfigBroadcast.cs    # Match initialization broadcast
+├── AOI/
+│   └── AOIManager.cs              # Area of Interest filtering
+├── Buffers/
+│   └── ServerCommandBuffer.cs     # Server-side command acknowledgment
 ├── CommandHelper.cs               # Network ↔ Sim conversion
 └── SnapshotHelper.cs              # Snapshot creation/application
 

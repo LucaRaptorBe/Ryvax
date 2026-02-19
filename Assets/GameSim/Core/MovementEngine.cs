@@ -18,7 +18,7 @@ namespace MOBANet.GameSim.Core
 
         /// <summary>
         /// Process one tick of movement physics.
-        /// Call this every simulation tick (30Hz).
+        /// Call this every simulation tick (60Hz, matches NetcodeConstants.TICK_RATE).
         /// </summary>
         /// <param name="transform">Entity's transform state (modified in place)</param>
         /// <param name="moveSpeed">Entity's current move speed (from stats)</param>
@@ -44,13 +44,26 @@ namespace MOBANet.GameSim.Core
 
             // 5. Combine impulse velocity + input velocity and move
             Vector3 totalVelocity = transform.Velocity + inputVelocity;
+            transform.EffectiveVelocity = totalVelocity;
             transform.Position += totalVelocity * dt;
 
             // 6. Ground check and arena bounds
             ApplyGroundCheck(ref transform, config);
             ClampToArenaBounds(ref transform, config);
 
-            // 7. Update rotation toward move direction
+            // 7. Zero out vertical effective velocity when grounded
+            // so the snapshot doesn't include GroundedPullDown,
+            // which would cause client dead-reckoning to drift downward.
+            if (transform.IsGrounded)
+            {
+                transform.EffectiveVelocity = new Vector3(
+                    transform.EffectiveVelocity.x,
+                    0f,
+                    transform.EffectiveVelocity.z
+                );
+            }
+
+            // 8. Update rotation toward move direction
             if (transform.MoveDirection.sqrMagnitude > 0.01f)
             {
                 float targetRotation = Mathf.Atan2(transform.MoveDirection.x, transform.MoveDirection.z) * Mathf.Rad2Deg;
@@ -307,7 +320,7 @@ namespace MOBANet.GameSim.Core
         /// </summary>
         public static float GetHorizontalSpeed(TransformState transform)
         {
-            return new Vector2(transform.Velocity.x, transform.Velocity.z).magnitude;
+            return new Vector2(transform.EffectiveVelocity.x, transform.EffectiveVelocity.z).magnitude;
         }
 
         #endregion

@@ -16,7 +16,7 @@ MonoBehaviour:
   description: Self buff for 4s granting 25/35/45% attack speed. Next basic attack
     is empowered dealing 40/70/100 bonus physical damage. Recast refreshes empowered
     attack and extends duration by 4s (max 8s).
-  icon: {fileID: 0}
+  icon: {fileID: 21300000, guid: 0f8f7eeb913994a2e86f53739d294252, type: 3}
   baseDamage: 40
   baseCooldown: 12
   baseRange: 0

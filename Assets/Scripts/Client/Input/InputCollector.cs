@@ -1,4 +1,4 @@
-// InputCollector.cs - Collecte input utilisateur (V3.0)
+// InputCollector.cs - Collecte input utilisateur (V3.1)
 // LOL-STYLE: Converts raw input to InputIntent (MoveTo, Stop, Follow)
 // Uses IntentBuilder for rate-limiting and lookahead calculation
 //
@@ -8,12 +8,20 @@
 // V3.0 Changes:
 // - Sets local move intent for instant rotation/animation feedback
 // - Position follows server, only rotation/animation respond immediately
+//
+// V3.1 Changes:
+// - Reads keybinds + movement mode from SettingsManager (configurable)
+// - Blocks game input when settings UI is open
 
 using UnityEngine;
 using UnityEngine.InputSystem;
 using MOBANet.NetAdapter.Messages;
 using MOBANet.UnityView.Core;
 using MOBANet.Client.Input;
+using MOBANet.Client.Settings;
+using MOBANet.Client.Casting;
+using MOBANet.Client.Targeting;
+using MOBANet.GameSim.Data;
 using MOBANet.Diagnostics;
 
 namespace MOBANet.UnityView.Input
@@ -23,7 +31,7 @@ namespace MOBANet.UnityView.Input
     ///
     /// LOL-STYLE ARCHITECTURE:
     /// - Raw input (WASD, clicks) is converted to InputIntent
-    /// - IntentBuilder handles rate-limiting (~10Hz for keyboard)
+    /// - IntentBuilder handles rate-limiting (120Hz for keyboard)
     /// - Click-to-move sends immediate MoveTo intent
     /// - WASD sends periodic MoveTo towards lookahead point
     ///
@@ -36,15 +44,14 @@ namespace MOBANet.UnityView.Input
     ///
     /// V3.0: Pure LoL style - sets local move intent for rotation/animation
     /// feedback. Position follows server, no local prediction.
+    ///
+    /// V3.1: Keybinds and movement mode read from SettingsManager.
     /// </summary>
     [DefaultExecutionOrder(-100)]
     public class InputCollector : MonoBehaviour
     {
         [Header("References")]
         [SerializeField] private NetworkClient _networkClient;
-
-        [Header("Settings")]
-        [SerializeField] private MovementMode _movementMode = MovementMode.WASD;
 
         // Intent builder for converting input to intentions
         private IntentBuilder _intentBuilder;
@@ -58,6 +65,14 @@ namespace MOBANet.UnityView.Input
 
         // Debug: track movement state transitions
         private bool _wasMovingLastFrame;
+
+        // Cast indicator system
+        private CastController _castController;
+        private SkillshotIndicator _skillshotIndicator;
+
+        // Targeting system
+        private TargetingSystem _targetingSystem;
+        private bool _targetingSystemInitialized;
 
         #region Public Properties
 
@@ -78,9 +93,18 @@ namespace MOBANet.UnityView.Input
 
         #endregion
 
+        /// <summary>
+        /// Expose the targeting system for HUD integration (TargetInfoUI).
+        /// </summary>
+        public TargetingSystem TargetingSystem => _targetingSystem;
+
         void Awake()
         {
             _intentBuilder = new IntentBuilder();
+            CreateCastController();
+
+            // Create targeting system
+            _targetingSystem = gameObject.AddComponent<TargetingSystem>();
         }
 
         void Update()
@@ -88,18 +112,107 @@ namespace MOBANet.UnityView.Input
             if (_networkClient == null || !_networkClient.IsConnected) return;
             if (_networkClient.LocalEntityId == 0) return;
 
+            // Lazy-init targeting system when NetworkClient is available
+            if (_targetingSystem != null && !_targetingSystemInitialized)
+            {
+                _targetingSystem.Initialize(_networkClient);
+                _targetingSystemInitialized = true;
+            }
+
+            // V3.1: Block all game input when settings UI is open
+            if (SettingsManager.IsUIBlockingInput) return;
+
             // 1. Handle movement input (creates intents)
             HandleMovementInput();
 
-            // 2. Handle discrete events (jump, abilities)
+            // 2. Update aiming indicator every frame if active
+            _castController?.UpdateAiming();
+
+            // 3. Handle discrete events (jump, abilities)
             HandleDiscreteEvents();
+
+            // 4. Handle targeting input (Tab, Escape)
+            HandleTargetingInput();
         }
+
+        #region Settings Helpers
+
+        /// <summary>
+        /// Get current movement mode from settings, fallback to WASD.
+        /// </summary>
+        private MovementMode GetMovementMode()
+        {
+            return SettingsManager.Instance?.CurrentSettings?.movementMode ?? MovementMode.WASD;
+        }
+
+        /// <summary>
+        /// Get current game settings, or null if SettingsManager not yet initialized.
+        /// </summary>
+        private GameSettings GetSettings()
+        {
+            return SettingsManager.Instance?.CurrentSettings;
+        }
+
+        /// <summary>
+        /// Check if a KeyCode was pressed this frame using the New Input System.
+        /// Converts KeyCode to InputSystem Key and checks wasPressedThisFrame.
+        /// </summary>
+        private bool IsKeyPressed(KeyCode keyCode)
+        {
+            var kb = Keyboard.current;
+            if (kb == null) return false;
+            var key = KeyCodeToKey(keyCode);
+            return key.HasValue && kb[key.Value].wasPressedThisFrame;
+        }
+
+        /// <summary>
+        /// Check if a KeyCode was released this frame (for QuickCastWithIndicator).
+        /// </summary>
+        private bool IsKeyReleased(KeyCode keyCode)
+        {
+            var kb = Keyboard.current;
+            if (kb == null) return false;
+            var key = KeyCodeToKey(keyCode);
+            return key.HasValue && kb[key.Value].wasReleasedThisFrame;
+        }
+
+        /// <summary>
+        /// Convert legacy KeyCode to New Input System Key.
+        /// Covers the most common keys used for MOBA keybinds.
+        /// </summary>
+        private static Key? KeyCodeToKey(KeyCode kc) => kc switch
+        {
+            KeyCode.A => Key.A, KeyCode.B => Key.B, KeyCode.C => Key.C, KeyCode.D => Key.D,
+            KeyCode.E => Key.E, KeyCode.F => Key.F, KeyCode.G => Key.G, KeyCode.H => Key.H,
+            KeyCode.I => Key.I, KeyCode.J => Key.J, KeyCode.K => Key.K, KeyCode.L => Key.L,
+            KeyCode.M => Key.M, KeyCode.N => Key.N, KeyCode.O => Key.O, KeyCode.P => Key.P,
+            KeyCode.Q => Key.Q, KeyCode.R => Key.R, KeyCode.S => Key.S, KeyCode.T => Key.T,
+            KeyCode.U => Key.U, KeyCode.V => Key.V, KeyCode.W => Key.W, KeyCode.X => Key.X,
+            KeyCode.Y => Key.Y, KeyCode.Z => Key.Z,
+            KeyCode.Alpha0 => Key.Digit0, KeyCode.Alpha1 => Key.Digit1,
+            KeyCode.Alpha2 => Key.Digit2, KeyCode.Alpha3 => Key.Digit3,
+            KeyCode.Alpha4 => Key.Digit4, KeyCode.Alpha5 => Key.Digit5,
+            KeyCode.Alpha6 => Key.Digit6, KeyCode.Alpha7 => Key.Digit7,
+            KeyCode.Alpha8 => Key.Digit8, KeyCode.Alpha9 => Key.Digit9,
+            KeyCode.Space => Key.Space, KeyCode.Tab => Key.Tab,
+            KeyCode.LeftShift => Key.LeftShift, KeyCode.RightShift => Key.RightShift,
+            KeyCode.LeftControl => Key.LeftCtrl, KeyCode.RightControl => Key.RightCtrl,
+            KeyCode.LeftAlt => Key.LeftAlt, KeyCode.RightAlt => Key.RightAlt,
+            KeyCode.BackQuote => Key.Backquote, KeyCode.Minus => Key.Minus,
+            KeyCode.Equals => Key.Equals,
+            KeyCode.F1 => Key.F1, KeyCode.F2 => Key.F2, KeyCode.F3 => Key.F3,
+            KeyCode.F4 => Key.F4, KeyCode.F5 => Key.F5, KeyCode.F6 => Key.F6,
+            _ => null
+        };
+
+        #endregion
 
         #region Movement Input (Intent-Based)
 
         /// <summary>
         /// Handle movement input and create InputIntent.
         /// V2.2: Propagates immobilize lock to IntentBuilder.
+        /// V3.1: Reads movement mode from settings.
         /// </summary>
         private void HandleMovementInput()
         {
@@ -109,7 +222,7 @@ namespace MOBANet.UnityView.Input
 
             InputIntent? intent = null;
 
-            switch (_movementMode)
+            switch (GetMovementMode())
             {
                 case MovementMode.WASD:
                     intent = HandleWASDInput();
@@ -128,7 +241,7 @@ namespace MOBANet.UnityView.Input
 
         /// <summary>
         /// Handle WASD/ZQSD keyboard input.
-        /// Creates MoveTo intent at 10Hz towards lookahead point.
+        /// Creates MoveDir intent at 120Hz towards movement direction.
         /// Creates Stop intent when releasing keys.
         /// V3.0: Sets local move intent for instant rotation/animation feedback.
         /// </summary>
@@ -137,16 +250,26 @@ namespace MOBANet.UnityView.Input
             var kb = Keyboard.current;
             if (kb == null) return null;
 
-            // Sample keyboard direction
+            // Sample keyboard direction based on layout setting
             Vector2 dir = Vector2.zero;
-            // Forward: W (QWERTY) or Z (AZERTY)
-            if (kb.wKey.isPressed || kb.zKey.isPressed) dir.y += 1;
-            // Backward: S (both layouts)
-            if (kb.sKey.isPressed) dir.y -= 1;
-            // Right: D (both layouts)
-            if (kb.dKey.isPressed) dir.x += 1;
-            // Left: A (QWERTY) or Q (AZERTY)
-            if (kb.aKey.isPressed || kb.qKey.isPressed) dir.x -= 1;
+            bool azerty = GetSettings()?.keyboardLayout == KeyboardLayout.AZERTY;
+
+            if (azerty)
+            {
+                // AZERTY: ZQSD
+                if (kb.zKey.isPressed) dir.y += 1;
+                if (kb.sKey.isPressed) dir.y -= 1;
+                if (kb.dKey.isPressed) dir.x += 1;
+                if (kb.qKey.isPressed) dir.x -= 1;
+            }
+            else
+            {
+                // QWERTY: WASD
+                if (kb.wKey.isPressed) dir.y += 1;
+                if (kb.sKey.isPressed) dir.y -= 1;
+                if (kb.dKey.isPressed) dir.x += 1;
+                if (kb.aKey.isPressed) dir.x -= 1;
+            }
 
             if (dir.sqrMagnitude > 1f) dir = dir.normalized;
 
@@ -177,7 +300,7 @@ namespace MOBANet.UnityView.Input
                 _networkClient.ClearLocalMoveIntent();
             }
 
-            // V3.0: Build MoveDir intent from keyboard input (rate-limited to 10Hz)
+            // V3.0: Build MoveDir intent from keyboard input (rate-limited to 120Hz)
             // No longer need basePos/visualOffset/speed - server handles movement
             uint clientTick = _networkClient.GetCurrentTick();
             return _intentBuilder.OnKeyboardMove(dir, Time.deltaTime, clientTick);
@@ -193,16 +316,21 @@ namespace MOBANet.UnityView.Input
             var mouse = Mouse.current;
             if (mouse == null) return null;
 
-            // Right-click to move
+            // Right-click: move to ground OR attack enemy (handled by HandleTargetingInput)
             if (mouse.rightButton.wasPressedThisFrame)
             {
-                Vector3 worldPos = GetMouseWorldPosition();
-                if (worldPos != Vector3.zero)
+                // If RClick hit an enemy, targeting already handled it — don't move
+                var enemy = RaycastEnemy();
+                if (enemy == null)
                 {
-                    _currentIsMoving = true;
-                    _lastClickTarget = worldPos;  // V3.0: Store for intent feedback
-                    uint clientTick = _networkClient.GetCurrentTick();
-                    return _intentBuilder.OnClickToMove(worldPos, clientTick);
+                    Vector3 worldPos = GetMouseWorldPosition();
+                    if (worldPos != Vector3.zero)
+                    {
+                        _currentIsMoving = true;
+                        _lastClickTarget = worldPos;
+                        uint clientTick = _networkClient.GetCurrentTick();
+                        return _intentBuilder.OnClickToMove(worldPos, clientTick);
+                    }
                 }
             }
 
@@ -254,42 +382,195 @@ namespace MOBANet.UnityView.Input
                 HandleJumpInput();
             }
 
-            // Abilities (E/R only when in WASD mode, Q/W used for movement)
-            // In ClickToMove mode, Q/W/E/R are all abilities
+            // V3.1: Abilities use configurable keybinds from settings
             HandleAbilityInput();
         }
 
         private void HandleJumpInput()
         {
-            const float GRAVITY = -20f;
-            const float JUMP_HEIGHT = 1.5f;
-            float jumpVelocity = Mathf.Sqrt(2f * Mathf.Abs(GRAVITY) * JUMP_HEIGHT);
-
-            var cmd = GameCommand.Launch(0, Vector3.up * jumpVelocity);
+            var cmd = GameCommand.Jump(0);
             _networkClient.SendEventCommand(cmd);
         }
 
+        /// <summary>
+        /// V3.1: Reads ability keybinds from GameSettings.
+        /// V4.0: Checks cast mode — may enter aiming state instead of immediate cast.
+        /// </summary>
         private void HandleAbilityInput()
+        {
+            // If currently aiming, handle confirm/cancel inputs instead
+            if (_castController != null && _castController.IsAiming)
+            {
+                HandleAimingInput();
+                return;
+            }
+
+            var settings = GetSettings();
+            if (settings == null)
+            {
+                HandleAbilityInputFallback();
+                return;
+            }
+
+            // Check all 4 ability keys, skipping any that conflict with movement
+            for (byte slot = 0; slot < 4; slot++)
+            {
+                KeyCode key = settings.GetAbilityKey(slot);
+                if (key == KeyCode.None) continue;
+                if (GetMovementMode() == MovementMode.WASD && IsMovementKey(key)) continue;
+                if (IsKeyPressed(key))
+                {
+                    TryCastAbility(slot, settings);
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Handle input while the cast controller is in Aiming state.
+        /// NormalCast: 2nd press of same key or LClick = confirm, RMB = cancel.
+        /// QuickCastWithIndicator: key release = confirm, RMB = cancel.
+        /// </summary>
+        private void HandleAimingInput()
+        {
+            var mouse = Mouse.current;
+            var settings = GetSettings();
+            CastMode mode = _castController.ActiveMode;
+            byte activeSlot = _castController.ActiveSlot;
+
+            // RMB cancels in all modes
+            if (mouse != null && mouse.rightButton.wasPressedThisFrame)
+            {
+                _castController.CancelCast();
+                return;
+            }
+
+            // Escape cancels
+            if (Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            {
+                _castController.CancelCast();
+                return;
+            }
+
+            if (mode == CastMode.NormalCast)
+            {
+                // LClick confirms
+                if (mouse != null && mouse.leftButton.wasPressedThisFrame)
+                {
+                    ConfirmAndSendCast();
+                    return;
+                }
+
+                // 2nd press of same ability key confirms
+                KeyCode activeKey = settings != null ? settings.GetAbilityKey(activeSlot) : KeyCode.None;
+                if (activeKey != KeyCode.None && IsKeyPressed(activeKey))
+                {
+                    ConfirmAndSendCast();
+                    return;
+                }
+
+                // Pressing a different ability key: cancel current + start new
+                if (settings != null)
+                {
+                    for (byte slot = 0; slot < 4; slot++)
+                    {
+                        if (slot == activeSlot) continue;
+                        KeyCode key = settings.GetAbilityKey(slot);
+                        if (key != KeyCode.None && IsKeyPressed(key))
+                        {
+                            _castController.CancelCast();
+                            TryCastAbility(slot, settings);
+                            return;
+                        }
+                    }
+                }
+            }
+            else if (mode == CastMode.QuickCastWithIndicator)
+            {
+                // Key release confirms
+                KeyCode activeKey = settings != null ? settings.GetAbilityKey(activeSlot) : KeyCode.None;
+                if (activeKey != KeyCode.None && IsKeyReleased(activeKey))
+                {
+                    ConfirmAndSendCast();
+                    return;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Confirm the aiming cast and send the command to the server.
+        /// </summary>
+        private void ConfirmAndSendCast()
+        {
+            var result = _castController.ConfirmCast();
+            if (result.HasValue)
+            {
+                var cmd = GameCommand.CastAbility(0, result.Value.slot,
+                    new Vector2(result.Value.targetPos.x, result.Value.targetPos.z));
+                _networkClient.SendEventCommand(cmd);
+            }
+        }
+
+        /// <summary>
+        /// Try to cast an ability, respecting the current cast mode.
+        /// If NormalCast or QCWI and ability is a Skillshot, enters aiming state.
+        /// Otherwise fires immediately (QuickCast behavior).
+        /// </summary>
+        private void TryCastAbility(byte slot, GameSettings settings)
+        {
+            // Don't show indicator or cast if ability is on cooldown
+            if (_networkClient != null && _networkClient.IsAbilityOnCooldown(slot))
+                return;
+
+            CastMode castMode = settings.defaultCastMode;
+
+            // Try to get ability data to determine targeting type
+            IAbilityDefinition abilityDef = _networkClient?.GetLocalPlayerAbility(slot);
+            AbilityTargetType targetType = abilityDef?.TargetType ?? AbilityTargetType.Skillshot;
+            float range = abilityDef?.BaseRange ?? 16f;
+
+            // Attempt to start aiming (returns true if aiming started)
+            if (_castController != null && _castController.TryStartCast(slot, castMode, targetType, range))
+                return; // Aiming started, don't fire yet
+
+            // QuickCast or unsupported target type: fire immediately
+            FireAbilityImmediate(slot);
+        }
+
+        /// <summary>
+        /// Fallback for when SettingsManager is not yet initialized.
+        /// Uses the original hardcoded keys with QuickCast behavior.
+        /// </summary>
+        private void HandleAbilityInputFallback()
         {
             var kb = Keyboard.current;
             if (kb == null) return;
 
-            // In WASD mode, only E and R are abilities (Q/W used for movement)
-            // In ClickToMove mode, all Q/W/E/R are abilities
-            if (_movementMode == MovementMode.ClickToMove)
-            {
-                if (kb.qKey.wasPressedThisFrame) CastAbility(0);
-                else if (kb.wKey.wasPressedThisFrame) CastAbility(1);
-            }
-
-            if (kb.eKey.wasPressedThisFrame) CastAbility(2);
-            else if (kb.rKey.wasPressedThisFrame) CastAbility(3);
+            // Fallback: Q/E/R (skip W/A in WASD mode since they're movement)
+            if (kb.qKey.wasPressedThisFrame) FireAbilityImmediate(0);
+            else if (kb.eKey.wasPressedThisFrame) FireAbilityImmediate(2);
+            else if (kb.rKey.wasPressedThisFrame) FireAbilityImmediate(3);
         }
 
-        private void CastAbility(byte slot)
+        /// <summary>
+        /// Check if a KeyCode conflicts with movement keys for the current layout.
+        /// </summary>
+        private bool IsMovementKey(KeyCode kc)
+        {
+            bool azerty = GetSettings()?.keyboardLayout == KeyboardLayout.AZERTY;
+            if (azerty)
+                return kc == KeyCode.Z || kc == KeyCode.Q || kc == KeyCode.S || kc == KeyCode.D;
+            else
+                return kc == KeyCode.W || kc == KeyCode.A || kc == KeyCode.S || kc == KeyCode.D;
+        }
+
+        /// <summary>
+        /// Fire an ability immediately (QuickCast style, no indicator).
+        /// </summary>
+        private void FireAbilityImmediate(byte slot)
         {
             Vector3 targetPos = GetMouseWorldPosition();
-            var cmd = GameCommand.CastAbility(0, slot, targetPos);
+            var cmd = GameCommand.CastAbility(0, slot, new Vector2(targetPos.x, targetPos.z));
             _networkClient.SendEventCommand(cmd);
         }
 
@@ -310,6 +591,79 @@ namespace MOBANet.UnityView.Input
 
         #endregion
 
+        #region Targeting Input
+
+        private void HandleTargetingInput()
+        {
+            if (_targetingSystem == null) return;
+
+            var kb = Keyboard.current;
+            var mouse = Mouse.current;
+
+            // Tab: cycle through enemies
+            if (kb != null && kb.tabKey.wasPressedThisFrame)
+            {
+                _targetingSystem.CycleTarget();
+                return;
+            }
+
+            // Escape: clear target
+            if (kb != null && kb.escapeKey.wasPressedThisFrame && _targetingSystem.HasTarget)
+            {
+                _targetingSystem.ClearTarget();
+                return;
+            }
+
+            // Don't process mouse targeting while aiming a spell
+            if (_castController != null && _castController.IsAiming) return;
+
+            // LClick on enemy: select/lock target. LClick on nothing: clear.
+            if (mouse != null && mouse.leftButton.wasPressedThisFrame)
+            {
+                var enemy = RaycastEnemy();
+                if (enemy != null)
+                    _targetingSystem.LockTarget(enemy.EntityId);
+                else
+                    _targetingSystem.ClearTarget();
+            }
+
+            // RClick on enemy: lock target + auto-attack order
+            if (mouse != null && mouse.rightButton.wasPressedThisFrame)
+            {
+                var enemy = RaycastEnemy();
+                if (enemy != null)
+                {
+                    _targetingSystem.LockTarget(enemy.EntityId);
+                    var cmd = GameCommand.AttackTarget(0, enemy.EntityId);
+                    _networkClient.SendEventCommand(cmd);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Raycast to find an enemy PlayerView under the mouse cursor.
+        /// </summary>
+        private MOBANet.UnityView.Entities.PlayerView RaycastEnemy()
+        {
+            if (Camera.main == null || Mouse.current == null) return null;
+
+            Ray ray = Camera.main.ScreenPointToRay(Mouse.current.position.ReadValue());
+            if (Physics.Raycast(ray, out RaycastHit hit, 1000f))
+            {
+                var playerView = hit.collider.GetComponentInParent<MOBANet.UnityView.Entities.PlayerView>();
+                if (playerView != null && !playerView.IsLocalPlayer)
+                {
+                    var simPlayer = _networkClient.GetSimPlayer(playerView.EntityId);
+                    byte localTeamId = _networkClient.GetLocalTeamId();
+                    if (simPlayer != null && simPlayer.TeamId != localTeamId)
+                        return playerView;
+                }
+            }
+            return null;
+        }
+
+        #endregion
+
         #region Utility
 
         /// <summary>
@@ -320,14 +674,25 @@ namespace MOBANet.UnityView.Input
             _intentBuilder?.Reset();
             _currentMoveInput = Vector2.zero;
             _currentIsMoving = false;
+            _castController?.CancelCast();
+        }
+
+        /// <summary>
+        /// Create the SkillshotIndicator GameObject and the CastController.
+        /// </summary>
+        private void CreateCastController()
+        {
+            var indicatorGO = new GameObject("SkillshotIndicator");
+            indicatorGO.transform.SetParent(transform);
+            _skillshotIndicator = indicatorGO.AddComponent<SkillshotIndicator>();
+
+            _castController = new CastController(
+                _skillshotIndicator,
+                () => _networkClient != null ? _networkClient.GetVisualPosition() : Vector3.zero,
+                () => GetMouseWorldPosition()
+            );
         }
 
         #endregion
-    }
-
-    public enum MovementMode
-    {
-        WASD,
-        ClickToMove
     }
 }

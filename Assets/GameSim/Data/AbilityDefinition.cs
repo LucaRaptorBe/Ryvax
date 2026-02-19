@@ -19,6 +19,9 @@ namespace MOBANet.GameSim.Data
         [SerializeField] private float baseCooldown = 5f;
         [SerializeField] private float baseRange = 5f;
 
+        [Header("Visuals")]
+        [SerializeField] private GameObject projectilePrefab;
+
         [Header("Targeting")]
         [SerializeField] private AbilityTargetType targetType = AbilityTargetType.Targeted;
         [SerializeField] private TargetFilter targetFilter = TargetFilter.Enemies;
@@ -38,6 +41,7 @@ namespace MOBANet.GameSim.Data
         public float BaseDamage => baseDamage;
         public float BaseCooldown => baseCooldown;
         public float BaseRange => baseRange;
+        public GameObject ProjectilePrefab => projectilePrefab;
         public AbilityTargetType TargetType => targetType;
         public TargetFilter TargetFilter => targetFilter;
         public string Spec1Name => spec1Name;

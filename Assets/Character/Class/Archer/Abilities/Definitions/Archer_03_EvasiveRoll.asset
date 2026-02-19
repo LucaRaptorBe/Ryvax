@@ -14,7 +14,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   abilityName: Evasive Roll
   description: Dash a short distance in the target direction.
-  icon: {fileID: 0}
+  icon: {fileID: 21300000, guid: cbe478ed63e1c4b19acbd4da77cb1e38, type: 3}
   baseDamage: 0
   baseCooldown: 10
   baseRange: 0

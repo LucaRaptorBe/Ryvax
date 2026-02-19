@@ -1,5 +1,5 @@
 // SnapshotDelta.cs - Server snapshot sent to clients
-// Contains all entity states, sent unreliable at ~20-30Hz
+// Contains all entity states, sent unreliable at 60Hz (= TICK_RATE)
 
 using System;
 using System.Runtime.InteropServices;
@@ -9,8 +9,8 @@ namespace MOBANet.NetAdapter.Messages
 {
     /// <summary>
     /// Server snapshot containing entity states.
-    /// Sent unreliable at snapshot rate (20-30Hz).
-    /// Packet loss is acceptable - clients interpolate between snapshots.
+    /// Sent unreliable at snapshot rate (60Hz = TICK_RATE).
+    /// Packet loss is acceptable - clients dead-reckon between snapshots.
     /// </summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct SnapshotDelta : INetMessage
@@ -133,7 +133,13 @@ namespace MOBANet.NetAdapter.Messages
         /// </summary>
         public byte EventFlags;
 
-        // Total size: 4 + 1 + 1 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 1 = 26 bytes per entity
+        /// <summary>
+        /// Ability cooldowns (4 slots), quantized to byte (0-255 = 0-60 seconds, ~0.24s precision).
+        /// Only meaningful for player entities.
+        /// </summary>
+        public byte Cd0, Cd1, Cd2, Cd3;
+
+        // Total size: 4 + 1 + 1 + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 2 + 2 + 1 + 4 = 30 bytes per entity
 
         #region Quantization Constants
 
@@ -157,6 +163,12 @@ namespace MOBANet.NetAdapter.Messages
         /// short range: -32768 to +32767 → -327 to +327 u/s
         /// </summary>
         public const float VELOCITY_SCALE = 100f;
+
+        /// <summary>
+        /// Max cooldown representable in a byte (seconds).
+        /// 60s covers most abilities. Longer cooldowns clamp to 60.
+        /// </summary>
+        public const float COOLDOWN_MAX = 60f;
 
         #endregion
 
@@ -206,6 +218,18 @@ namespace MOBANet.NetAdapter.Messages
         public float Speed => SpeedQ / 10f;
 
         /// <summary>
+        /// Get dequantized cooldown for ability slot (0-3).
+        /// </summary>
+        public float GetCooldown(int slot) => slot switch
+        {
+            0 => Cd0 / 255f * COOLDOWN_MAX,
+            1 => Cd1 / 255f * COOLDOWN_MAX,
+            2 => Cd2 / 255f * COOLDOWN_MAX,
+            3 => Cd3 / 255f * COOLDOWN_MAX,
+            _ => 0f
+        };
+
+        /// <summary>
         /// Check if entity is under immobilizing CC
         /// </summary>
         public bool HasImmobilizeCC => (EventFlags & (byte)EntityEventFlags.ImmobilizeCC) != 0;
@@ -244,11 +268,11 @@ namespace MOBANet.NetAdapter.Messages
             Vector3 velocity,
             float mapScale = MAP_SCALE)
         {
-            return FromSimEntity(entityId, entityType, position, rotationY, health, state, isAlive, velocity, 0f, EntityEventFlags.None, mapScale);
+            return FromSimEntity(entityId, entityType, position, rotationY, health, state, isAlive, velocity, 0f, EntityEventFlags.None, null, mapScale);
         }
 
         /// <summary>
-        /// Create EntityState from simulation entity with speed and event flags
+        /// Create EntityState from simulation entity with speed, event flags, and cooldowns
         /// </summary>
         public static EntityState FromSimEntity(
             uint entityId,
@@ -261,6 +285,7 @@ namespace MOBANet.NetAdapter.Messages
             Vector3 velocity,
             float speed,
             EntityEventFlags eventFlags,
+            float[] cooldowns = null,
             float mapScale = MAP_SCALE)
         {
             byte flags = 0;
@@ -281,7 +306,11 @@ namespace MOBANet.NetAdapter.Messages
                 VelZ = QuantizeVelocity(velocity.z),
                 VelY = QuantizeVelocity(velocity.y),
                 SpeedQ = (ushort)Mathf.Clamp(speed * 10f, 0, ushort.MaxValue),
-                EventFlags = (byte)eventFlags
+                EventFlags = (byte)eventFlags,
+                Cd0 = QuantizeCooldown(cooldowns, 0),
+                Cd1 = QuantizeCooldown(cooldowns, 1),
+                Cd2 = QuantizeCooldown(cooldowns, 2),
+                Cd3 = QuantizeCooldown(cooldowns, 3),
             };
         }
 
@@ -306,6 +335,14 @@ namespace MOBANet.NetAdapter.Messages
         {
             float normalized = ((degrees % 360f) + 360f) % 360f / 360f;
             return (ushort)(normalized * QUANT_FACTOR);
+        }
+
+        private static byte QuantizeCooldown(float[] cooldowns, int slot)
+        {
+            if (cooldowns == null || slot >= cooldowns.Length) return 0;
+            float cd = cooldowns[slot];
+            if (cd <= 0f) return 0;
+            return (byte)Mathf.Clamp(cd / COOLDOWN_MAX * 255f, 1, 255);
         }
 
         #endregion

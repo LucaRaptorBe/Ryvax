@@ -27,7 +27,7 @@ namespace MOBANet.Core
         [Tooltip("Prédiction client-side et réconciliation")]
         public bool predictionLogs = true;
 
-        [Tooltip("⚠️ OFF par défaut - Simulation de jeu (boucle à 30Hz)")]
+        [Tooltip("⚠️ OFF par défaut - Simulation de jeu (boucle à 60Hz)")]
         public bool gameSimLogs = false;
 
         [Tooltip("⚠️ OFF par défaut - Génération de snapshots (2000+ logs/sec à 100 joueurs!)")]

@@ -19,6 +19,8 @@ using MOBANet.Client.Input;
 using MOBANet.GameSim.Commands;
 using MOBANet.Diagnostics;
 using MOBANet.Client.Animation;
+using MOBANet.GameSim.Data;
+using System;
 
 // Alias to avoid ambiguity with UnityEngine.EventType
 using NetEventType = MOBANet.NetAdapter.Messages.EventType;
@@ -39,6 +41,10 @@ namespace MOBANet.UnityView.Core
 
         [Header("Input")]
         [SerializeField] private float _inputSendRate = 120f; // Hz
+
+        [Header("Data")]
+        [Tooltip("Index by CharacterClassType enum value (0=None, 1=Archer, 2=Mage, ...)")]
+        [SerializeField] private CharacterClass[] _characterClasses;
 
         // State
         private SimWorld _simWorld;
@@ -81,6 +87,12 @@ namespace MOBANet.UnityView.Core
         /// The UI should show class selection when this becomes true.
         /// </summary>
         public bool IsWaitingForClassSelection => _localSpawnDeferred;
+
+        /// <summary>
+        /// Fired when any player casts an ability (entityId, slot).
+        /// HUD uses this to start smooth local cooldown countdown.
+        /// </summary>
+        public event Action<uint, byte> OnAbilityCast;
 
         /// <summary>
         /// Get the visual position for the local player.
@@ -268,7 +280,7 @@ namespace MOBANet.UnityView.Core
             _eventSeq++;
             cmd.Sequence = _eventSeq;
             _eventBuffer.Add(cmd);
-            Debug.Log($"[NetworkClient] SendEventCommand queued: Cat={cmd.Category}, Action={cmd.Action}, Seq={_eventSeq}, localEntityId={_localEntityId}");
+            // Debug.Log($"[NetworkClient] SendEventCommand queued: Cat={cmd.Category}, Action={cmd.Action}, Seq={_eventSeq}, localEntityId={_localEntityId}");
             return _eventSeq;
         }
 
@@ -353,7 +365,7 @@ namespace MOBANet.UnityView.Core
                     var simPlayer = _simWorld.GetEntity(state.EntityId) as SimPlayer;
                     if (simPlayer != null)
                     {
-                        simPlayer.ApplyNetworkState(state.Position, state.Velocity, state.Rotation);
+                        simPlayer.ApplyNetworkState(state.Position, state.Velocity, state.Rotation, state);
                     }
 
                     // Log snapshots for debugging (local player only for clarity)
@@ -369,7 +381,6 @@ namespace MOBANet.UnityView.Core
 
         private void OnEventReceived(int _, ReliableEvent evt)
         {
-            Debug.Log($"[NetworkClient] OnEventReceived: Type={evt.Type}, EntityId={evt.EntityId}, Data1={evt.Data1}");
             switch (evt.Type)
             {
                 case NetEventType.EntitySpawn:
@@ -380,6 +391,15 @@ namespace MOBANet.UnityView.Core
                     break;
                 case NetEventType.ClassAssign:
                     OnClassAssign(evt);
+                    break;
+                case NetEventType.DamageDealt:
+                    OnDamageDealt(evt);
+                    break;
+                case NetEventType.EntityRespawn:
+                    OnEntityRespawn(evt);
+                    break;
+                case NetEventType.AbilityUsed:
+                    OnAbilityUsed(evt);
                     break;
                 case NetEventType.Ping:
                     var pingMeasure = GetComponent<MOBANet.Diagnostics.NetworkPingMeasure>();
@@ -401,6 +421,8 @@ namespace MOBANet.UnityView.Core
             byte teamId = ReliableEvent.DecodeTeamId(evt);
             bool localIdKnown = LocalClientId >= 0;
             bool isLocal = localIdKnown && ownerClientId == LocalClientId;
+
+
 
             if (_playerViews.ContainsKey(evt.EntityId))
             {
@@ -511,9 +533,131 @@ namespace MOBANet.UnityView.Core
             }
         }
 
+        private void OnAbilityUsed(ReliableEvent evt)
+        {
+            var (slot, direction) = ReliableEvent.DecodeAbilityUsed(evt);
+
+            // Trigger animation on caster's PlayerView
+            if (_playerViews.TryGetValue(evt.EntityId, out var view))
+            {
+                view.TriggerAbility(slot);
+            }
+
+            // Notify HUD to start smooth cooldown countdown
+            OnAbilityCast?.Invoke(evt.EntityId, slot);
+
+            // Spawn cosmetic projectile
+            var caster = _simWorld.GetEntity<SimPlayer>(evt.EntityId);
+            if (caster != null)
+            {
+                // Look up projectile prefab from ability definition
+                GameObject prefab = GetProjectilePrefab(caster.ClassId, slot);
+                float range = GetAbilityRange(caster.ClassId, slot);
+                float speed = 20f; // TODO: read from ability definition
+                SpawnCosmeticProjectile(caster.Transform.Position, direction, prefab, speed, range);
+            }
+        }
+
+        private GameObject GetProjectilePrefab(int classId, int slot)
+        {
+            if (_characterClasses == null || classId < 0 || classId >= _characterClasses.Length)
+                return null;
+            return _characterClasses[classId]?.GetAbilityDefinition(slot)?.ProjectilePrefab;
+        }
+
+        private float GetAbilityRange(int classId, int slot)
+        {
+            if (_characterClasses == null || classId < 0 || classId >= _characterClasses.Length)
+                return 16f;
+            return _characterClasses[classId]?.GetAbilityDefinition(slot)?.BaseRange ?? 16f;
+        }
+
+        /// <summary>
+        /// Get the ability definition for a given slot of the local player.
+        /// Used by InputCollector/CastController to read TargetType and BaseRange.
+        /// </summary>
+        public IAbilityDefinition GetLocalPlayerAbility(int slot)
+        {
+            var player = _simWorld.GetEntity<SimPlayer>(_localEntityId);
+            if (player == null) return null;
+            if (_characterClasses == null || player.ClassId < 0 || player.ClassId >= _characterClasses.Length)
+                return null;
+            return _characterClasses[player.ClassId]?.GetAbilityDefinition(slot);
+        }
+
+        /// <summary>
+        /// Check if an ability slot is on cooldown for the local player.
+        /// </summary>
+        public bool IsAbilityOnCooldown(int slot)
+        {
+            var player = _simWorld.GetEntity<SimPlayer>(_localEntityId);
+            if (player == null) return true;
+            return player.Abilities.Cooldowns[slot] > 0;
+        }
+
+        private void SpawnCosmeticProjectile(Vector3 startPos, Vector3 direction, GameObject prefab, float speed, float range)
+        {
+            GameObject go;
+            if (prefab != null)
+            {
+                go = Instantiate(prefab);
+                go.name = "Projectile_Cosmetic";
+                go.transform.position = startPos + Vector3.up * 1f;
+                go.transform.rotation = Quaternion.LookRotation(direction);
+            }
+            else
+            {
+                // Fallback: primitive capsule if no prefab assigned
+                go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+                go.name = "Projectile_Cosmetic_Fallback";
+                go.transform.localScale = new Vector3(0.2f, 0.5f, 0.2f);
+                go.transform.position = startPos + Vector3.up * 1f;
+
+                var col = go.GetComponent<Collider>();
+                if (col != null) UnityEngine.Object.Destroy(col);
+            }
+
+            var projView = go.GetComponent<ProjectileView>() ?? go.AddComponent<ProjectileView>();
+            projView.Initialize(go.transform.position, direction, speed, range);
+        }
+
+        private void OnDamageDealt(ReliableEvent evt)
+        {
+            uint targetId = evt.EntityId;
+            int damage = (int)evt.Data2;
+
+            if (_playerViews.TryGetValue(targetId, out var view))
+            {
+                view.OnDamage(damage);
+            }
+        }
+
         private void OnEntityDeath(uint entityId)
         {
-            // TODO: Death handling
+            if (_playerViews.TryGetValue(entityId, out var view))
+            {
+                view.OnDeath();
+            }
+        }
+
+        private void OnEntityRespawn(ReliableEvent evt)
+        {
+            // Decode spawn position (same encoding as EntityRespawn factory)
+            short posX = (short)evt.Data1;
+            short posZ = (short)evt.Data2;
+            Vector3 spawnPos = new Vector3(posX / 100f, 0f, posZ / 100f);
+
+            if (_playerViews.TryGetValue(evt.EntityId, out var view))
+            {
+                view.OnRespawn(spawnPos);
+            }
+
+            // Reset health in sim
+            var simPlayer = _simWorld.GetEntity<SimPlayer>(evt.EntityId);
+            if (simPlayer != null)
+            {
+                simPlayer.Respawn(spawnPos);
+            }
         }
 
         private void TryInitializeLocalPlayer()
@@ -554,6 +698,53 @@ namespace MOBANet.UnityView.Core
                     SpawnPlayerView(entityId, simPlayer, isLocal: false);
                 }
             }
+        }
+
+        #endregion
+
+        #region Targeting Helpers
+
+        /// <summary>
+        /// Get the local player's team ID.
+        /// </summary>
+        public byte GetLocalTeamId()
+        {
+            var player = _simWorld.GetEntity<SimPlayer>(_localEntityId);
+            return player?.TeamId ?? 0;
+        }
+
+        /// <summary>
+        /// Get a PlayerView by entity ID.
+        /// </summary>
+        public PlayerView GetPlayerView(uint entityId)
+        {
+            _playerViews.TryGetValue(entityId, out var view);
+            return view;
+        }
+
+        /// <summary>
+        /// Get all enemy PlayerViews relative to the given team.
+        /// </summary>
+        public System.Collections.Generic.List<PlayerView> GetEnemyPlayerViews(byte localTeamId)
+        {
+            var result = new System.Collections.Generic.List<PlayerView>();
+            foreach (var kvp in _playerViews)
+            {
+                var simPlayer = _simWorld.GetEntity<SimPlayer>(kvp.Key);
+                if (simPlayer != null && simPlayer.TeamId != localTeamId && simPlayer.Stats.IsAlive)
+                {
+                    result.Add(kvp.Value);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Get the SimPlayer for a given entity ID.
+        /// </summary>
+        public SimPlayer GetSimPlayer(uint entityId)
+        {
+            return _simWorld.GetEntity<SimPlayer>(entityId);
         }
 
         #endregion

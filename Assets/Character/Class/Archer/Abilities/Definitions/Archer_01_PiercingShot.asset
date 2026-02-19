@@ -15,10 +15,11 @@ MonoBehaviour:
   abilityName: Piercing Shot
   description: Projectile skillshot. Range 1200, width 100, speed 2000, cast time
     0.25s. Deals 80/120/160 physical damage.
-  icon: {fileID: 0}
+  icon: {fileID: 21300000, guid: edbca04c4262c492ea1a1a23ebfb3cd5, type: 3}
   baseDamage: 80
   baseCooldown: 6
-  baseRange: 1200
+  baseRange: 16
+  projectilePrefab: {fileID: 2107954478058429839, guid: 07a5c01d793954a71ba5e2825ff887be, type: 3}
   targetType: 3
   targetFilter: 0
   spec1Name: Relentless Shot

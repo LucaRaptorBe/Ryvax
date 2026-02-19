@@ -39,9 +39,10 @@ namespace MOBANet.GameSim.Commands
         protected virtual void RegisterDefaultHandlers()
         {
             RegisterHandler(CommandCategory.Movement, new MovementHandler());
+            RegisterHandler(CommandCategory.Ability, new AbilityHandler());
+            RegisterHandler(CommandCategory.System, new SystemHandler());
             // TODO: Create new handlers in component-based architecture
             // RegisterHandler(CommandCategory.Attack, new AttackHandler());
-            // RegisterHandler(CommandCategory.Ability, new AbilityHandler());
             // RegisterHandler(CommandCategory.Item, new ItemHandler());
         }
 

@@ -2,7 +2,7 @@
 
 > **Status:** Production
 > **Version:** 5.0 (120Hz Input System)
-> **Last Updated:** 2026-02-03
+> **Last Updated:** 2026-02-18
 
 ## Overview
 
@@ -28,7 +28,7 @@ This document provides **measured performance metrics** for the Ryvax netcode sy
 | **Input-to-Visual Latency** | 50ms | <60ms | ✅ Achieved |
 | **Client-Side Delay** | 0ms | <10ms | ✅ Achieved |
 | **Server-Side Delay** | 33ms | <50ms | ✅ Achieved |
-| **Bandwidth (per client)** | 6.7 KB/s up, 16.4 KB/s down | <50 KB/s | ✅ Achieved |
+| **Bandwidth (per client)** | 6.7 KB/s up, 18.4 KB/s down | <50 KB/s | ✅ Achieved |
 | **Packet Loss Tolerance** | 2 consecutive packets | 1+ packets | ✅ Achieved |
 
 ### Key Improvements Over V1.0
@@ -106,10 +106,8 @@ TOTAL:                    50ms    100%
 - Double-flush eliminates batching delay
 
 **Server-Side (33ms):**
-- ⚠️ **Server poll delay (17ms):** Time between packet arriving at OS and server reading it
-  - **Current:** Server polls in FixedUpdate (~60fps)
-  - **Improvement:** Poll in Update (~120fps) → reduce to ~8ms
-  - **Gain:** -9ms
+- ✅ **Server poll delay:** `ForceIterateIncoming()` already runs in `Update()` at frame rate (~120fps), giving ~4ms average poll delay. The 17ms figure in the timeline above reflects an older measurement.
+  - **Current:** Server polls in Update (~120fps) — already optimized
 
 - ⚠️ **Server tick interval (16ms):** Inherent delay at 60Hz tick rate
   - **Current:** 60Hz = 16.67ms per tick
@@ -126,10 +124,10 @@ TOTAL:                    50ms    100%
 
 ```
 Current:     50ms
-- Server poll:    -9ms  (60fps → 120fps poll)
-- Server tick:    -8ms  (60Hz → 120Hz tick)
+- Server poll:    ~0ms  (already polling in Update() — already done)
+- Server tick:    -8ms  (60Hz → 120Hz tick — Priority 1)
 ─────────────────────────
-Optimized:   ~33ms
+Optimized:   ~42ms
 
 Further (client prediction):
 - Perceived:  0ms  (instant local movement, reconcile later)
@@ -242,23 +240,21 @@ public void ForceIterateOutgoing()
 
 **Server Poll Delay Explanation:**
 
-Server calls `ForceIterateIncoming()` in FixedUpdate START:
+Server calls `ForceIterateIncoming()` in `Update()` — every frame, decoupled from tick rate (ServerGameLoop.cs:229-236):
 
 ```csharp
-void FixedUpdate()  // Called at 60fps = 16.67ms interval
+private void Update()  // Called at frame rate (~120fps = ~8ms interval)
 {
+    if (!_isRunning) return;
     _netAdapter.ForceIterateIncoming();  // Poll transport here
-    // ...
 }
 ```
 
-**Worst case:** Packet arrives 1ms after last FixedUpdate → waits 16ms for next poll.
+**Worst case:** Packet arrives 1ms after last Update → waits ~8ms for next poll (at 120fps).
 
-**Average case:** Half the interval = 8ms.
+**Average case:** Half the interval = ~4ms.
 
-**Measured case:** 17ms suggests packet arrived just after last poll.
-
-**Optimization:** Poll in Update() instead (120fps = 8.3ms interval) → reduces average to 4ms.
+**Measured case:** 17ms in the timeline above reflects an older measurement from when polling was in FixedUpdate. With Update() polling at 120fps the average poll delay is ~4ms.
 
 #### Input Application (ServerGameLoop.cs:144)
 
@@ -285,11 +281,17 @@ void FixedUpdate()  // Called at 60fps = 16.67ms interval
 **Key:** MovementHandler executes immediately after input applied.
 
 ```csharp
-void FixedUpdate()
+// Update() — every frame
+private void Update()
 {
-    ForceIterateIncoming();           // Poll
-    FlushPendingMovementInputs();     // Apply
-    _simWorld.Tick();                 // Simulate (0ms later)
+    _netAdapter.ForceIterateIncoming();  // Poll (decoupled from tick)
+}
+
+// FixedUpdate() — tick rate
+private void FixedUpdate()
+{
+    RunSimulation();      // DrainInputQueue → FlushPending → _simWorld.Step()
+    BroadcastSnapshots();
 }
 ```
 
@@ -419,29 +421,32 @@ Total per packet:    56 bytes
 
 ```
 Header:              14 bytes
-+ 10 entity states:  260 bytes (10 × 26)
++ 10 entity states:  300 bytes (10 × 30)
 ─────────────────────────────
-Total per snapshot:  274 bytes
+Total per snapshot:  314 bytes
 ```
+
+EntityState size confirmed at `SnapshotDelta.cs:142`:
+`// Total size: 4+1+1+2+2+2+2+2+1+2+2+2+2+1+4 = 30 bytes per entity`
 
 **Send Rate:** 60 snapshots/sec
 
 **Download Bandwidth:**
 
 ```
-274 bytes/snapshot × 60 snapshots/sec = 16,440 bytes/sec
-= 16.4 KB/s per client
-= 131.2 Kbps per client
+314 bytes/snapshot × 60 snapshots/sec = 18,840 bytes/sec
+= 18.4 KB/s per client
+= 147.2 Kbps per client
 ```
 
 **Server Outgoing (10 Clients):**
 
 ```
-16.4 KB/s × 10 = 164 KB/s
-= 1.3 Mbps
+18.4 KB/s × 10 = 184 KB/s
+= 1.5 Mbps
 ```
 
-**Acceptable for modern servers.** Dedicated server: 100 Mbps up (can handle 762 clients).
+**Acceptable for modern servers.** Dedicated server: 100 Mbps up (can handle ~660 clients).
 
 ---
 
@@ -450,8 +455,8 @@ Total per snapshot:  274 bytes
 | Direction | Bytes/Sec | Kilobits/Sec | Notes |
 |-----------|-----------|--------------|-------|
 | **Upload** | 6,720 | 53.6 | Input packets (120Hz) |
-| **Download** | 16,440 | 131.2 | Snapshots (60Hz) |
-| **Total** | 23,160 | 184.8 | Combined |
+| **Download** | 18,840 | 147.2 | Snapshots (60Hz) |
+| **Total** | 25,560 | 204.8 | Combined |
 
 **For comparison:**
 
@@ -467,12 +472,12 @@ Ryvax is comparable to modern competitive games.
 
 | Clients | Upload | Download | Total | Feasibility |
 |---------|--------|----------|-------|-------------|
-| 1 | 6.7 KB/s | 16.4 KB/s | 23.1 KB/s | ✅ Trivial |
-| 10 | 67 KB/s | 164 KB/s | 231 KB/s | ✅ Easy |
-| 50 | 335 KB/s | 820 KB/s | 1.2 MB/s | ✅ Feasible |
-| 100 | 670 KB/s | 1.6 MB/s | 2.3 MB/s | ✅ Feasible (10 Mbps server) |
-| 500 | 3.4 MB/s | 8.2 MB/s | 11.6 MB/s | ⚠️ Requires 100 Mbps server |
-| 1000 | 6.7 MB/s | 16.4 MB/s | 23.1 MB/s | ⚠️ Requires 200 Mbps server |
+| 1 | 6.7 KB/s | 18.4 KB/s | 25.1 KB/s | ✅ Trivial |
+| 10 | 67 KB/s | 184 KB/s | 251 KB/s | ✅ Easy |
+| 50 | 335 KB/s | 920 KB/s | 1.3 MB/s | ✅ Feasible |
+| 100 | 670 KB/s | 1.8 MB/s | 2.5 MB/s | ✅ Feasible (10 Mbps server) |
+| 500 | 3.4 MB/s | 9.2 MB/s | 12.6 MB/s | ⚠️ Requires 100 Mbps server |
+| 1000 | 6.7 MB/s | 18.4 MB/s | 25.1 MB/s | ⚠️ Requires 200 Mbps server |
 
 **Bottleneck:** Server outgoing bandwidth (snapshots).
 
@@ -481,10 +486,10 @@ Ryvax is comparable to modern competitive games.
 **Example (AOI with 5 visible entities instead of 10):**
 
 ```
-Snapshot size: 14 + (5 × 26) = 144 bytes (was 274)
-Bandwidth: 8.6 KB/s per client (was 16.4)
-100 clients: 860 KB/s (was 1.6 MB/s)
-→ Doubles capacity to 200 clients on 10 Mbps connection
+Snapshot size: 14 + (5 × 30) = 164 bytes (was 314)
+Bandwidth: 9.8 KB/s per client (was 18.4)
+100 clients: 980 KB/s (was 1.8 MB/s)
+→ Nearly doubles capacity on 10 Mbps connection
 ```
 
 ---
@@ -544,36 +549,40 @@ Result: No data loss despite 2 consecutive packet losses!
 
 ### Snapshot Loss Tolerance
 
-**Configuration:** No redundancy (relies on interpolation)
+**Configuration:** No redundancy (relies on dead-reckoning)
 
 **How It Works:**
 
 1. Client receives snapshots at 60Hz
-2. Interpolates between snapshots in buffer
-3. If snapshot lost, interpolates between older snapshots
+2. Between snapshots, dead-reckoning extrapolates: `visualPos = lastServerPos + lastServerVel × dt`
+3. If a snapshot is lost, dead-reckoning continues from the last received snapshot
 
 **Loss Tolerance:**
 
 ```
-Snapshot A: t=1.000s, pos=(0, 0, 0)
+Snapshot A: t=1.000s, pos=(0, 0, 0), vel=(8, 0, 0)
 Snapshot B: t=1.016s, LOST
 Snapshot C: t=1.033s, pos=(0.267, 0, 0)
 
-Client interpolating at t=1.024s:
-→ Uses A and C (skips missing B)
-→ Lerp((0,0,0), (0.267,0,0), alpha=0.73) = (0.195, 0, 0)
-→ Slightly less accurate but smooth
+Client at t=1.024s (snapshot B lost, dead-reckoning from A):
+→ dt = 1.024 - 1.000 = 0.024s
+→ deadReckonedPos = (0,0,0) + (8,0,0) × 0.024 = (0.192, 0, 0)
+→ Accurate while velocity is constant
 ```
 
-**Maximum tolerance:** 3-4 consecutive lost snapshots (~50-66ms gap).
+**Maximum tolerance:** As long as velocity is constant, dead-reckoning stays accurate
+indefinitely. Divergence accumulates only when the server changes direction between
+snapshots.
 
-**Beyond that:** Extrapolation or freeze (quality degrades).
+**Beyond constant velocity:** Visual position drifts until next snapshot corrects it
+via snap smoothing.
 
 **Measured Packet Loss (Localhost):** 0%
 
 **Expected Online:** Same as inputs (0-2% typical).
 
-**Impact:** Minimal - interpolation smooths over gaps.
+**Impact:** Minimal for MOBA movement — direction changes are infrequent and
+snap smoothing absorbs corrections.
 
 ---
 
@@ -586,7 +595,7 @@ Client interpolating at t=1.024s:
 **Files Modified:**
 
 - `IntentBuilder.cs:37` - `INTENT_SEND_INTERVAL = 0.033f`
-- `NetworkClient.cs:54` - `_inputSendRate = 30f`
+- `NetworkClient.cs:43` - `_inputSendRate = 30f`
 
 **Results:**
 
@@ -604,7 +613,7 @@ Client interpolating at t=1.024s:
 **Files Modified:**
 
 - `IntentBuilder.cs:37` - `INTENT_SEND_INTERVAL = 0.0167f`
-- `NetworkClient.cs:54` - `_inputSendRate = 60f`
+- `NetworkClient.cs:43` - `_inputSendRate = 60f`
 
 **Results:**
 
@@ -643,7 +652,7 @@ Client interpolating at t=1.024s:
 **Files Modified:**
 
 - `IntentBuilder.cs:37` - `INTENT_SEND_INTERVAL = 0.0083f`
-- `NetworkClient.cs:54` - `_inputSendRate = 120f`
+- `NetworkClient.cs:43` - `_inputSendRate = 120f`
 - `NetcodeConstants.cs:23` - `TICK_RATE = 60`
 
 **Results:**
@@ -681,22 +690,25 @@ Client interpolating at t=1.024s:
 
 ---
 
-### Priority 2: Server Update() Polling
+### Priority 2: Server Update() Polling — ✅ ALREADY IMPLEMENTED
 
-**Current:** Poll in FixedUpdate (~60fps = 16ms interval)
+**Status:** Done. `ForceIterateIncoming()` is already called in `Update()`, not `FixedUpdate()` (ServerGameLoop.cs:229-236).
 
-**Proposal:** Poll in Update (~120fps = 8ms interval)
+**Actual implementation:**
 
-**Expected Gain:** -9ms (17ms average → 8ms average poll delay)
+```csharp
+private void Update()  // frame rate (~120fps)
+{
+    if (!_isRunning) return;
+    _netAdapter.ForceIterateIncoming();
+}
+```
 
-**Files to Modify:**
+**Gain already realized:** Average poll delay ~4ms (vs ~8ms if still in FixedUpdate at 60fps).
 
-- `ServerGameLoop.cs:117-120` - Move poll from FixedUpdate to Update
-- Add buffering to handle multiple polls per tick
+**No files to modify.**
 
-**Complexity:** Medium (requires careful sync between Update and FixedUpdate)
-
-**Projected Total Latency:** 33ms (42ms → 33ms with both optimizations)
+**Projected Total Latency with Priority 1:** ~42ms (50ms → 42ms with 120Hz tick only)
 
 ---
 
@@ -729,11 +741,11 @@ Client interpolating at t=1.024s:
 **Example:**
 
 ```
-Full state:  26 bytes per entity
+Full state:  30 bytes per entity
 Delta state: 6-12 bytes per entity (only pos/vel changed)
 
-10 entities: 260 bytes → 60-120 bytes
-Bandwidth:   16.4 KB/s → 4-8 KB/s per client
+10 entities: 300 bytes → 60-120 bytes
+Bandwidth:   18.4 KB/s → 4-8 KB/s per client
 ```
 
 **Complexity:** High (requires state tracking, baseline snapshots, loss recovery)
@@ -753,10 +765,10 @@ Bandwidth:   16.4 KB/s → 4-8 KB/s per client
 **Example (5/10 entities visible):**
 
 ```
-10 entities: 274 bytes per snapshot
-5 entities:  144 bytes per snapshot
+10 entities: 314 bytes per snapshot
+5 entities:  164 bytes per snapshot
 
-Bandwidth: 16.4 KB/s → 8.6 KB/s per client
+Bandwidth: 18.4 KB/s → 9.8 KB/s per client
 ```
 
 **Complexity:** Medium (requires spatial partitioning, visibility tracking)
@@ -774,7 +786,7 @@ Bandwidth: 16.4 KB/s → 8.6 KB/s per client
 1. ✅ 120Hz input rate (already done)
 2. ✅ Double-flush (already done)
 3. ✅ 60Hz server tick (already done)
-4. ⚠️ Server Update() polling (Priority 2)
+4. ✅ Server Update() polling (Priority 2 — already implemented)
 5. ⚠️ 120Hz server tick (Priority 1)
 
 **Target:** 33ms latency (acceptable for MOBA)
@@ -876,7 +888,7 @@ Bandwidth: 16.4 KB/s → 8.6 KB/s per client
 
 - **CPU Usage:** Monitor `FixedUpdate()` time (should be <5ms)
 - **Network:** Track bytes sent/received per frame
-- **Rendering:** Verify interpolation overhead (<1ms)
+- **Rendering:** Verify dead-reckoning overhead in `EntityView.UpdatePosition()` (<1ms)
 
 **FishNet Stats:**
 
@@ -927,7 +939,7 @@ void OnGUI()
 
 | Game | Upload | Download | Total |
 |------|--------|----------|-------|
-| **Ryvax** | 6.7 KB/s | 16.4 KB/s | 23.1 KB/s |
+| **Ryvax** | 6.7 KB/s | 18.4 KB/s | 25.1 KB/s |
 | League of Legends | ~3-5 KB/s | ~10-15 KB/s | ~15-20 KB/s |
 | Valorant | ~8-12 KB/s | ~20-30 KB/s | ~30-40 KB/s |
 | CS:GO (64-tick) | ~5-8 KB/s | ~10-15 KB/s | ~15-25 KB/s |
@@ -953,21 +965,21 @@ void OnGUI()
 
 ### Remaining Bottlenecks
 
-1. ⚠️ **Server poll delay (17ms)** - Can reduce to ~8ms
-2. ⚠️ **Server tick interval (16ms)** - Can reduce to ~8ms
+1. ✅ **Server poll delay** - Already ~4ms avg (Update() polling at 120fps)
+2. ⚠️ **Server tick interval (16ms)** - Can reduce to ~8ms with 120Hz tick (Priority 1)
 3. Network return (17ms) - Mostly inherent (network + client poll)
 
 ### Realistic Limits
 
-**Best Achievable (All Optimizations):**
+**Best Achievable (Priority 1 applied — 120Hz tick):**
 
-- **Localhost:** ~33ms (limited by 120Hz tick + network stack overhead)
-- **Online (50ms RTT):** ~83ms (33ms + 50ms network)
+- **Localhost:** ~42ms (50ms − 8ms from halved tick interval)
+- **Online (50ms RTT):** ~92ms (42ms + 50ms network)
 
 **With Client Prediction:**
 
 - **Perceived:** 0ms (instant local movement)
-- **Actual:** 33-83ms (reconciliation happens invisibly)
+- **Actual:** 42ms+ (reconciliation happens invisibly)
 
 ### Final Recommendation
 
@@ -980,7 +992,7 @@ void OnGUI()
 - No rubber-banding (cleaner UX than prediction)
 - Simpler codebase (no reconciliation complexity)
 
-**Optional:** Apply Priority 1+2 optimizations if targeting competitive esports (→ 33ms).
+**Optional:** Apply Priority 1 (120Hz tick) if targeting competitive esports (→ 42ms). Priority 2 (Update() polling) is already implemented.
 
 ---
 

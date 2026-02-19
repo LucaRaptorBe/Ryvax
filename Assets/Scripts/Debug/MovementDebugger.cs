@@ -1,5 +1,5 @@
 // MovementDebugger.cs - Triggered logging system for movement residual diagnosis
-// Activates on key release and logs for 200ms (~6 ticks at 30Hz)
+// Activates on key release and logs for 200ms (~12 ticks at 60Hz)
 
 using UnityEngine;
 
@@ -7,11 +7,11 @@ namespace MOBANet.Diagnostics
 {
     /// <summary>
     /// Triggered logging system for diagnosing residual movement.
-    /// Activates on key release and logs for 200ms (~6 ticks).
+    /// Activates on key release and logs for 200ms (~12 ticks at 60Hz).
     /// </summary>
     public static class MovementDebugger
     {
-        private const float LOG_DURATION = 0.2f; // 200ms = ~6 ticks at 30Hz
+        private const float LOG_DURATION = 0.2f; // 200ms = ~12 ticks at 60Hz
 
         public static bool IsLogging { get; private set; }
         public static float LogEndTime { get; private set; }

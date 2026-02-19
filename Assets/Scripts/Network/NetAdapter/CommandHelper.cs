@@ -45,6 +45,10 @@ namespace MOBANet.NetAdapter
                 case CommandCategory.Item:
                     InterpretItemCommand(ref simCmd, cmd);
                     break;
+
+                case CommandCategory.System:
+                    InterpretSystemCommand(ref simCmd, cmd);
+                    break;
             }
 
             return simCmd;
@@ -99,6 +103,12 @@ namespace MOBANet.NetAdapter
             }
         }
 
+        private static void InterpretSystemCommand(ref SimCommand simCmd, in GameCommand cmd)
+        {
+            // ClassSelect: class ID is in Data0
+            simCmd.Slot = (byte)cmd.Data0;
+        }
+
         /// <summary>
         /// Convert a SimCommand back to a GameCommand (if needed for replay/debug).
         /// </summary>
@@ -131,19 +141,9 @@ namespace MOBANet.NetAdapter
                     break;
 
                 case CommandCategory.Ability:
-                    if (simCmd.Action == AbilityAction.Launch)
-                    {
-                        // Launch: velocity stored in Direction
-                        cmd.Data0 = GameCommand.QuantizePosition(simCmd.Direction.x);
-                        cmd.Data1 = GameCommand.QuantizePosition(simCmd.Direction.z);
-                        cmd.Data2 = (uint)(ushort)GameCommand.QuantizePosition(simCmd.Direction.y);
-                    }
-                    else
-                    {
-                        cmd.Data0 = GameCommand.QuantizePosition(simCmd.TargetPosition.x);
-                        cmd.Data1 = GameCommand.QuantizePosition(simCmd.TargetPosition.z);
-                        cmd.Data2 = simCmd.TargetEntityId;
-                    }
+                    cmd.Data0 = GameCommand.QuantizePosition(simCmd.TargetPosition.x);
+                    cmd.Data1 = GameCommand.QuantizePosition(simCmd.TargetPosition.z);
+                    cmd.Data2 = simCmd.TargetEntityId;
                     break;
 
                 case CommandCategory.Item:

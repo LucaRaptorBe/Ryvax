@@ -1,5 +1,6 @@
 using UnityEngine;
 using MOBANet.GameSim.Interfaces;
+using MOBANet.Client.HUD;
 
 /// <summary>
 /// Mannequin de test pour recevoir des dégâts.

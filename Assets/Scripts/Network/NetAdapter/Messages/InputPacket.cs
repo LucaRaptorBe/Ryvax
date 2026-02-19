@@ -37,7 +37,7 @@ namespace MOBANet.NetAdapter.Messages
     /// <summary>
     /// Bundled input packet containing intent and event commands for UDP redundancy.
     /// Each packet includes the last N commands, so packet loss is recovered
-    /// on the next packet arrival (typically 33ms at 30Hz).
+    /// on the next packet arrival (typically 8ms at 120Hz input rate).
     ///
     /// CRITICAL: IntentType determines how Payload0/Payload1 are interpreted.
     /// - MoveDir: DequantizeDirection (÷127)

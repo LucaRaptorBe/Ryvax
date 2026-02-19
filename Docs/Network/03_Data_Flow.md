@@ -2,7 +2,7 @@
 
 > **Status:** Production
 > **Version:** 5.0 (Pure LoL-style Netcode)
-> **Last Updated:** 2026-02-03
+> **Last Updated:** 2026-02-18
 
 ## Overview
 
@@ -41,7 +41,7 @@ This document traces the **complete input-to-visual flow** through the Ryvax net
 ┌─────────────────────────────────────────────────────────────┐
 │                          SERVER                             │
 ├─────────────────────────────────────────────────────────────┤
-│  ForceIterateIncoming() ── Poll transport (FixedUpdate)     │
+│  ForceIterateIncoming() ── Poll transport (Update)          │
 │      ↓ (+17ms from input)                                   │
 │  FishNetAdapter.HandleServerReceiveInputPacket()            │
 │      ↓ (0ms)                                                │
@@ -49,7 +49,7 @@ This document traces the **complete input-to-visual flow** through the Ryvax net
 │      ↓ (0ms)                                                │
 │  FixedUpdate START → FlushPendingMovementInputs()           │
 │      ↓ (0ms - applied immediately)                          │
-│  SimWorld.Tick() ── Apply input to simulation               │
+│  SimWorld.Step() ── Apply input to simulation               │
 │      ↓ (0ms)                                                │
 │  MovementHandler.Execute() ── Update position/velocity      │
 │      ↓ (+16ms for next tick)                                │
@@ -70,17 +70,15 @@ This document traces the **complete input-to-visual flow** through the Ryvax net
 │      ↓ (+50ms from input)                                   │
 │  NetworkClient.OnSnapshotReceived()                         │
 │      ↓ (0ms)                                                │
-│  VisualPositionManager.OnSnapshotReceived()                 │
-│      ↓ (0ms)                                                │
-│  BaseInterpolator.OnSnapshotReceived() ── Add to buffer     │
+│  PlayerView.OnSnapshotReceived() ── Store pos/vel/rot       │
 │      ↓ (every frame in Update)                              │
-│  VisualPositionManager.Update()                             │
+│  EntityView.UpdatePosition() ── Dead-reckoning              │
 │      ↓ (0ms)                                                │
-│  BaseInterpolator.GetBasePos() ── Interpolate snapshots     │
+│  extrapolate: visualPos = serverPos + serverVel × Δt        │
 │      ↓ (0ms)                                                │
-│  VisualOffsetCorrector.Update() ── Smooth discontinuities   │
+│  Snap smoothing: lerp towards dead-reckoned pos             │
 │      ↓ (0ms)                                                │
-│  PlayerView.UpdatePosition() ── Apply to transform          │
+│  transform.position = visualPos                             │
 │      ↓ (0ms)                                                │
 │  Unity Render ── Pixels on screen!                          │
 └─────────────────────────────────────────────────────────────┘
@@ -94,55 +92,64 @@ This document traces the **complete input-to-visual flow** through the Ryvax net
 
 ### 1. Input Capture (Client)
 
-**File:** `Assets/Scripts/Client/Input/InputCollector.cs:94-192`
+**File:** `Assets/Scripts/Client/Input/InputCollector.cs:110-136`
 
 **Trigger:** Unity `Update()` - every frame (~16ms at 60fps, ~8ms at 120fps)
 
 ```csharp
 void Update()
 {
-    HandleMovementInput();  // Line 112
+    HandleMovementInput();  // Line 126
 }
 
-void HandleMovementInput()
+private void HandleMovementInput()
 {
-    HandleWASDInput();      // Line 143
+    // Propagate immobilize lock to IntentBuilder
+    bool isImmobilized = _networkClient.IsImmobilized();
+    _intentBuilder.SetImmobilizeLock(isImmobilized);
+
+    InputIntent? intent = null;
+
+    switch (GetMovementMode())
+    {
+        case MovementMode.WASD:
+            intent = HandleWASDInput();  // Line 228
+            break;
+        case MovementMode.ClickToMove:
+            intent = HandleClickToMoveInput();
+            break;
+    }
+
+    if (intent.HasValue)
+        _networkClient.SendInputIntent(intent.Value);
 }
 
-void HandleWASDInput()
+private InputIntent? HandleWASDInput()
 {
-    // Sample keyboard state
+    // Sample keyboard direction (WASD or ZQSD depending on layout)
     Vector2 dir = Vector2.zero;
-    if (Keyboard.current.wKey.isPressed) dir.y += 1;  // Forward
-    if (Keyboard.current.sKey.isPressed) dir.y -= 1;  // Back
-    if (Keyboard.current.aKey.isPressed) dir.x -= 1;  // Left
-    if (Keyboard.current.dKey.isPressed) dir.x += 1;  // Right
+    if (kb.wKey.isPressed) dir.y += 1;
+    if (kb.sKey.isPressed) dir.y -= 1;
+    if (kb.dKey.isPressed) dir.x += 1;
+    if (kb.aKey.isPressed) dir.x -= 1;
 
-    bool isMoving = dir.sqrMagnitude > 0.01f;
-
-    // V5.0 PURE LOL: Set local intent (for rotation/animation feedback)
-    if (isMoving)
-    {
-        Vector3 moveDir3D = new Vector3(dir.x, 0, dir.y).normalized;
-        _networkClient.SetLocalMoveIntent(moveDir3D);  // Line 182
-    }
+    // V3.0: Set local move intent (no-op in V5.0 - kept for API compatibility)
+    if (dir.sqrMagnitude > 0.01f)
+        _networkClient.SetLocalMoveIntent(new Vector3(dir.x, 0f, dir.y));
     else
-    {
         _networkClient.ClearLocalMoveIntent();
-    }
 
-    // Send intent to server
-    var intent = _intentBuilder.OnKeyboardMove(dir, Time.deltaTime, currentTick);
-    if (intent != null)
-        _networkClient.SendInputIntent(intent);
+    // Build rate-limited MoveDir intent
+    uint clientTick = _networkClient.GetCurrentTick();
+    return _intentBuilder.OnKeyboardMove(dir, Time.deltaTime, clientTick);
 }
 ```
 
 **Key Points:**
 
-- **Local intent set immediately** for instant rotation/animation feedback
+- **`SetLocalMoveIntent` is a no-op in V5.0** - rotation/animation come from server velocity
 - **No local position change** - position comes 100% from server
-- Input sampled at frame rate (60-120 fps), but rate-limited by IntentBuilder
+- Input sampled at frame rate (60-120 fps), but rate-limited by IntentBuilder to 120Hz
 
 **Output:** `InputIntent` (if rate-limit passes)
 
@@ -150,12 +157,12 @@ void HandleWASDInput()
 
 ### 2. Intent Building (Client)
 
-**File:** `Assets/Scripts/Client/Input/IntentBuilder.cs:37-120`
+**File:** `Assets/Scripts/Client/Input/IntentBuilder.cs:37-158`
 
 **Rate Limit:** 120Hz (8.3ms interval)
 
 ```csharp
-private const float INTENT_SEND_INTERVAL = 0.0083f;  // 120Hz
+private const float INTENT_SEND_INTERVAL = 0.0083f;  // 120Hz - matches _inputSendRate
 
 public InputIntent OnKeyboardMove(Vector2 dir, float dt, uint clientTick)
 {
@@ -361,15 +368,17 @@ public void ForceIterateOutgoing()
 
 ### 8. Server Receive (Server)
 
-**File:** `Assets/Scripts/Server/ServerGameLoop.cs:117-120` (FixedUpdate START)
+**File:** `Assets/Scripts/Server/ServerGameLoop.cs:229-236` (Update — every frame)
 
 ```csharp
-void FixedUpdate()
+// Update() polls at frame rate (60-120 fps) — decoupled from tick rate.
+// This eliminates the 33ms delay from waiting for the next FixedUpdate.
+private void Update()
 {
-    // Poll transport BEFORE simulation tick
-    _netAdapter.ForceIterateIncoming();
+    if (!_isRunning) return;
 
-    // Now process buffered inputs...
+    // Process incoming packets at frame rate (not tick rate)
+    _netAdapter.ForceIterateIncoming();
 }
 ```
 
@@ -462,17 +471,20 @@ void OnMoveDirReceived(int clientId, uint seq, Vector2 dir, long timestamp)
 
 ### 11. Input Application (Server)
 
-**File:** `Assets/Scripts/Server/ServerGameLoop.cs:144-189` (FixedUpdate START)
+**File:** `Assets/Scripts/Server/ServerGameLoop.cs:241-249` (FixedUpdate)
 
 ```csharp
-void FixedUpdate()
+// Update() (every frame): ForceIterateIncoming() — see Stage 8
+// FixedUpdate() (tick rate): simulation only
+
+private void FixedUpdate()
 {
-    _netAdapter.ForceIterateIncoming();  // Poll first
+    if (!_isRunning) return;
 
-    FlushPendingMovementInputs();        // Apply buffered inputs
-
-    RunSimulation();                     // Tick simulation
-    BroadcastSnapshots();                // Send results
+    RunSimulation();       // DrainInputQueue → FlushPending → Step
+    TickWatchdog(Time.fixedDeltaTime);
+    TickRespawns();
+    BroadcastSnapshots();
 }
 
 private void FlushPendingMovementInputs()
@@ -521,23 +533,33 @@ private void FlushPendingMovementInputs()
 
 ### 12. Simulation Tick (Server)
 
-**File:** `Assets/Scripts/Server/ServerGameLoop.cs:191-200`
+**File:** `Assets/Scripts/Server/ServerGameLoop.cs:286-323`
 
 ```csharp
 private void RunSimulation()
 {
-    _simWorld.Tick();  // Advance simulation by 1 tick
+    int ticksToRun = _simWorld.Clock.Accumulate(Time.fixedDeltaTime);
+
+    for (int i = 0; i < ticksToRun; i++)
+    {
+        uint currentTick = _simWorld.Clock.CurrentTick;
+
+        DrainInputQueueForTick(currentTick);      // Pull from ConcurrentQueue
+        FlushPendingMovementInputs(currentTick);  // Apply to SimPlayers
+
+        _simWorld.Step();  // Advance physics/state, then Clock.Advance()
+
+        DrainAndBroadcastSimEvents();  // Projectile hits, deaths, etc.
+    }
 }
 ```
 
-**File:** `Assets/GameSim/Core/SimWorld.cs:84-104`
+**File:** `Assets/GameSim/Core/SimWorld.cs` — method `Step()` (not `Tick()`)
 
 ```csharp
-public void Tick()
+public void Step()
 {
-    _clock.Tick();  // Increment tick counter
-
-    _commandProcessor.ExecuteCommands(this);  // Process movement/abilities
+    // Advances physics/state, then increments clock
 }
 ```
 
@@ -589,34 +611,38 @@ After:  velocity = (8, 0, 0)   (8 u/s right)
 
 ### 13. Snapshot Creation (Server)
 
-**File:** `Assets/Scripts/Server/ServerGameLoop.cs:202-230`
+**File:** `Assets/Scripts/Server/ServerGameLoop.cs:345-440`
 
 ```csharp
 private void BroadcastSnapshots()
 {
     _snapshotAccumulator += Time.fixedDeltaTime;
 
-    // Broadcast at snapshot rate (60Hz = every tick)
-    if (_snapshotAccumulator < _snapshotInterval)
-        return;
-
+    if (_snapshotAccumulator < _snapshotInterval) return;
     _snapshotAccumulator -= _snapshotInterval;
 
-    foreach (var clientId in _netAdapter.GetConnectedClients())
+    // Iterate SimWorld.AllPlayers — not a GetConnectedClients() call
+    foreach (var player in _simWorld.AllPlayers)
     {
-        // Get last ACKed sequences
-        uint ackInputSeq = _lastProcessedSeq[clientId];
-        uint ackMovementSeq = _lastMovementSeq[clientId];
+        int clientId = player.OwnerClientId;
+        uint ackSeq = _commandBuffer.GetLastAckSeq(clientId);
+        uint movementSeq = _lastMovementSeq.TryGetValue(clientId, out uint seq) ? seq : 0;
 
-        // Create snapshot for this client
-        var snapshot = SnapshotHelper.CreateSnapshot(
-            _simWorld,
-            forClientId: clientId,
-            ackInputSeq: ackInputSeq,
-            ackMovementSeq: ackMovementSeq
-        );
+        SnapshotDelta snapshot;
+        if (_enableAOI)
+        {
+            // AOI: filtered to entities visible by this client
+            var visible = _aoiManager.GetVisibleEntities(clientId);
+            snapshot = SnapshotHelper.CreateFilteredSnapshot(
+                _simWorld, visible, ackSeq, player.Id, movementSeq);
+        }
+        else
+        {
+            // No AOI: all entities
+            snapshot = SnapshotHelper.CreateSnapshot(
+                _simWorld, clientId, ackSeq, movementSeq);
+        }
 
-        // Send unreliable (UDP)
         _netAdapter.SendToClient(clientId, snapshot, reliable: false);
     }
 }
@@ -690,343 +716,207 @@ private void HandleClientReceiveSnapshot(SnapshotBroadcast broadcast, Channel ch
 }
 ```
 
-**File:** `Assets/Scripts/Core/NetworkClient.cs:457-510`
+**File:** `Assets/Scripts/Core/NetworkClient.cs:351-380`
 
 ```csharp
-private void OnSnapshotReceived(int senderId, SnapshotDelta snapshot)
+private void OnSnapshotReceived(int _, SnapshotDelta snapshot)
 {
-    // Convert server tick to time
-    double serverTime = TickToTime(snapshot.ServerTick);
+    float serverTime = TickClock.TickToTime(snapshot.ServerTick);
 
-    // Update time sync
-    _timeSync.OnSnapshotReceived(serverTime);
-
-    // Find local player's entity in snapshot
     for (int i = 0; i < snapshot.EntityCount; i++)
     {
-        var entityState = snapshot.Entities[i];
+        ref readonly var state = ref snapshot.Entities[i];
 
-        if (entityState.EntityId == _localPlayerEntityId)
+        if (_playerViews.TryGetValue(state.EntityId, out var view))
         {
-            // Create SnapshotState from EntityState
-            var state = new SnapshotState
-            {
-                Position = entityState.Position,         // Dequantized
-                Velocity = entityState.Velocity,         // Dequantized
-                RotationY = entityState.Rotation,        // Dequantized
-                Speed = entityState.Speed,               // Dequantized
-                HasBlinkEvent = entityState.HasBlinkEvent,
-                HasTeleportEvent = entityState.HasTeleportEvent,
-                HasImmobilizeCC = entityState.HasImmobilizeCC
-            };
+            // All players (local and remote) use the same unified path
+            view.OnSnapshotReceived(state.Position, state.Velocity, state.Rotation);
 
-            // Pass to visual position manager
-            _visualPositionManager.OnSnapshotReceived(state, serverTime);
-            break;
+            // Update SimPlayer state in client-side SimWorld
+            var simPlayer = _simWorld.GetEntity(state.EntityId) as SimPlayer;
+            if (simPlayer != null)
+                simPlayer.ApplyNetworkState(state.Position, state.Velocity, state.Rotation, state);
         }
     }
+
+    _eventBuffer.AcknowledgeUpTo(snapshot.AckInputSeq);
 }
 ```
 
 **Key Points:**
 
-- **Dequantization** converts 16-bit values back to floats
-- **ServerTime calculated** from tick number
-- **Only local player processed** (remote players use different path)
+- **No `SnapshotState`, no `_timeSync`, no `_visualPositionManager`** — these do not exist in V5.0
+- **All entities processed** (local and remote) through the same unified path
+- **Dequantization** already applied inside `EntityState.Position/Velocity/Rotation` getters
+- Position is forwarded directly to `EntityView.OnSnapshotReceived()` for dead-reckoning
 
-**Output:** `SnapshotState` with dequantized values
+**Output:** `PlayerView.OnSnapshotReceived(position, velocity, rotationY)` called per entity
 
 ---
 
-### 16. Interpolation Buffer (Client)
+### 16. Dead-Reckoning State Store (Client)
 
-**File:** `Assets/Scripts/Client/Prediction/VisualPositionManager.cs:126-153`
+**File:** `Assets/Scripts/Client/View/Entities/EntityView.cs:136-148`
 
 ```csharp
-public void OnSnapshotReceived(SnapshotState state, double serverTime)
+// Called for every entity in every snapshot (local and remote)
+public virtual void OnSnapshotReceived(Vector3 position, Vector3 velocity, float rotationY)
 {
-    // Update time sync (adjusts adaptive buffer)
-    _timeSync.OnSnapshotReceived(serverTime);
+    // Initialize visual position on first snapshot (no smoothing from origin)
+    if (!_hasSnapshot)
+        _visualPos = position;
 
-    // Add snapshot to interpolation buffer
-    _interpolator.OnSnapshotReceived(state, serverTime);
-
-    // Update current speed for corrector thresholds
-    _currentSpeed = state.Speed;
-
-    // Update adaptive buffer in corrector
-    _corrector.SetAdaptiveBuffer(_timeSync.AdaptiveBuffer);
-
-    // Handle CC (immobilize snaps offset to zero)
-    _corrector.OnImmobilizeCC(state.HasImmobilizeCC);
-
-    // Handle discontinuities (blink, teleport)
-    if (state.HasBlinkEvent || state.HasTeleportEvent || state.HasStateReset)
-    {
-        _corrector.SnapHard(serverTime);
-        _basePrevValid = false;  // Don't absorb jump
-    }
+    _lastServerPos = position;
+    _lastServerVel = velocity;
+    _lastServerRotY = rotationY;
+    _lastSnapshotTime = Time.time;
+    _hasSnapshot = true;
 }
 ```
 
-**File:** `Assets/Scripts/Client/Interpolation/BaseInterpolator.cs:186-204`
+**Key Points:**
 
-```csharp
-public void OnSnapshotReceived(SnapshotState state, double serverTime)
-{
-    _buffer.Add(state, serverTime);  // Add to ring buffer
-}
-```
-
-**Buffer:** Ring buffer holds last ~8-10 snapshots for interpolation.
+- Stores the three values needed for dead-reckoning: `position`, `velocity`, `rotationY`
+- First snapshot initializes `_visualPos` directly (no lerp from world origin)
+- No interpolation buffer, no ring buffer, no time-sync
 
 ---
 
 ### 17. Frame Update Loop (Client)
 
-**File:** `Assets/Scripts/Core/NetworkClient.cs:224-251`
+**File:** `Assets/Scripts/Client/View/Entities/EntityView.cs:189-224`
 
 ```csharp
-void Update()
+protected virtual void Update()
 {
-    // Update time sync (advances perceived server time)
-    _timeSync.Update(Time.deltaTime);
+    if (!_isInitialized) return;
 
-    // Update visual position (interpolates between snapshots)
-    _visualPositionManager.Update(Time.deltaTime);
-
-    // Send inputs...
+    UpdatePosition();   // Dead-reckoning + snap smoothing
+    UpdateAnimation();  // Derive from server velocity
 }
 ```
 
-**File:** `Assets/Scripts/Client/Prediction/VisualPositionManager.cs:158-205`
-
-```csharp
-public void Update(float dt)
-{
-    // Update time sync
-    _timeSync.Update(dt);
-
-    // Get render time (server time - adaptive buffer)
-    double renderTime = _timeSync.RenderTime;
-
-    // Get interpolated base position
-    var result = _interpolator.GetBasePos(renderTime);
-    _basePos = result.Position;
-
-    // Detect discontinuities
-    if (result.HadDiscontinuity)
-    {
-        _corrector.SnapHard();
-        _basePrevValid = false;
-    }
-
-    // Absorb basePos jumps with visual offset
-    if (_basePrevValid && result.Quality == InterpolationQuality.Interpolated)
-    {
-        _corrector.AbsorbBasePosJump(_basePrev, _basePos);
-    }
-
-    _basePrev = _basePos;
-    _basePrevValid = true;
-
-    // Update corrector (exponential decay of offset)
-    _corrector.Update(dt, _currentSpeed);
-}
-```
-
-**Key Points:**
-
-- **RenderTime** = ServerTime - AdaptiveBuffer (~80-160ms behind)
-- **BasePos** = Lerp between two snapshots at renderTime
-- **VisualOffset** absorbs jumps to maintain continuity
+**`UpdatePosition()` is the core rendering step** — see Stage 18.
 
 ---
 
-### 18. Interpolation (Client)
+### 18. Dead-Reckoning & Snap Smoothing (Client)
 
-**File:** `Assets/Scripts/Client/Interpolation/BaseInterpolator.cs:206-260`
+**File:** `Assets/Scripts/Client/View/Entities/EntityView.cs:197-224`
 
 ```csharp
-public InterpolationResult GetBasePos(double renderTime)
+protected virtual void UpdatePosition()
 {
-    // Find two snapshots bracketing renderTime
-    bool found = FindBracketingSnapshots(renderTime, out var A, out var B, out float alpha);
+    if (!_hasSnapshot) return;
 
-    if (!found)
+    // Dead-reckoning: extrapolate from last known server position
+    float dt = Time.time - _lastSnapshotTime;
+    Vector3 deadReckonedPos = _lastServerPos + _lastServerVel * dt;
+
+    // Snap smoothing: lerp towards dead-reckoned position
+    // BUT snap immediately when stopped to avoid sliding
+    if (_lastServerVel.sqrMagnitude < 0.01f)
     {
-        // Extrapolate or freeze if no snapshots available
-        // ...
-        return new InterpolationResult
-        {
-            Position = _buffer.GetLatest().Position,
-            Quality = InterpolationQuality.Frozen
-        };
+        // Stopped: snap directly to server position
+        _visualPos = deadReckonedPos;
+    }
+    else
+    {
+        // Moving: smooth towards dead-reckoned position
+        _visualPos = Vector3.Lerp(_visualPos, deadReckonedPos,
+            NetcodeConstants.VISUAL_SMOOTHING_SPEED * Time.deltaTime);
     }
 
-    // Interpolate position
-    Vector3 position = Vector3.Lerp(A.Position, B.Position, alpha);
-
-    return new InterpolationResult
-    {
-        Position = position,
-        RotationY = Mathf.LerpAngle(A.RotationY, B.RotationY, alpha),
-        Quality = InterpolationQuality.Interpolated,
-        HadDiscontinuity = false
-    };
+    transform.position = _visualPos;
+    transform.rotation = Quaternion.Euler(0, _lastServerRotY, 0);
 }
 ```
 
 **Example:**
 
 ```
-Snapshot A: time=1.000s, pos=(0, 0, 0)
-Snapshot B: time=1.016s, pos=(0.133, 0, 0)
-RenderTime: 1.008s
-Alpha: (1.008 - 1.000) / (1.016 - 1.000) = 0.5
+Snapshot received: serverPos=(0,0,0), serverVel=(8,0,0), rotY=90°, time=1.000s
 
-Interpolated: Lerp((0,0,0), (0.133,0,0), 0.5) = (0.066, 0, 0)
+Frame at t=1.008s (8ms later):
+  dt = 1.008 - 1.000 = 0.008s
+  deadReckonedPos = (0,0,0) + (8,0,0) × 0.008 = (0.064, 0, 0)
+  _visualPos = Lerp(_visualPos, (0.064,0,0), smoothingSpeed × 0.008)
 ```
 
-**Result:** Smooth position between snapshots, not discrete jumps.
+**Key Points:**
+
+- **No interpolation buffer** — no snapshots are queued; only the latest is retained
+- **Dead-reckoning** bridges the gap between snapshots (60Hz = 16ms between)
+- **Snap when stopped** prevents sliding after the player releases keys
+- **Rotation** applied directly from server (`_lastServerRotY`) — no local intent in V5.0
 
 ---
 
-### 19. Visual Offset Correction (Client)
+### 19. Animation Update (Client)
 
-**File:** `Assets/Scripts/Client/Prediction/VisualOffsetCorrector.cs:78-136`
-
-**Purpose:** Absorb basePos jumps (from interpolation discontinuities) to maintain visual continuity.
+**File:** `Assets/Scripts/Client/View/Entities/EntityView.cs:234-245`
 
 ```csharp
-public void AbsorbBasePosJump(Vector3 basePrev, Vector3 basePos)
+protected virtual void UpdateAnimation()
 {
-    if (_isImmobilized) return;  // Skip during CC
+    if (_animator == null) return;
 
-    // Add delta to visual offset (keeps visual position continuous)
-    Vector3 delta = basePrev - basePos;
-    _visualOffset += delta;
-}
+    _animator.SetInteger(StateHash, _currentState);
 
-public void Update(float dt, float currentSpeed)
-{
-    if (_isImmobilized)
-    {
-        _visualOffset = Vector3.zero;  // Snap during CC
-        return;
-    }
+    // Derive speed from server velocity — no local intent used
+    float speed = _lastServerVel.magnitude;
+    _animator.SetFloat(SpeedHash, speed);
 
-    float gap = _visualOffset.magnitude;
-
-    // Too small - snap to zero
-    if (gap < 0.5f)
-    {
-        _visualOffset = Vector3.zero;
-        return;
-    }
-
-    // Dynamic thresholds based on speed
-    float smallGap = Mathf.Max(20f, currentSpeed * 0.06f);
-    float largeGap = Mathf.Clamp(Mathf.Max(80f, currentSpeed * 0.25f), 80f, 250f);
-
-    // Exponential decay (smooth correction)
-    if (gap < smallGap)
-    {
-        _visualOffset *= Mathf.Exp(-6f * dt);  // Gentle
-    }
-    else if (gap < largeGap)
-    {
-        _visualOffset *= Mathf.Exp(-15f * dt);  // Aggressive
-    }
-    else
-    {
-        _visualOffset = Vector3.zero;  // Snap (too far)
-    }
+    bool isGrounded = transform.position.y <= 0.1f;
+    _animator.SetBool(IsGroundedHash, isGrounded);
 }
 ```
 
 **Key Points:**
 
-- **Absorb jumps** to avoid visual pops
-- **Exponential decay** smooths correction over time
-- **Speed-based thresholds** adapt to movement velocity
-- **CC handling** snaps offset to zero (no smoothing during root/stun)
+- **Speed derived from `_lastServerVel.magnitude`** — not from local intent
+- **`HasLocalMoveIntent()` / `GetLocalMoveIntent()` do not exist** in V5.0 `NetworkClient`. `SetLocalMoveIntent()` and `ClearLocalMoveIntent()` exist but are explicit no-ops (NetworkClient.cs:122-127)
+- Animation lags ~16ms behind input (one snapshot interval) — acceptable for MOBA
 
 ---
 
 ### 20. Visual Rendering (Client)
 
-**File:** `Assets/Scripts/Client/View/Entities/PlayerView.cs:128-214`
+**File:** `Assets/Scripts/Client/View/Entities/EntityView.cs:189-224`
+
+The full per-frame rendering path for all entities (local and remote) is identical in V5.0:
+
+```
+Every Update():
+  1. UpdatePosition()
+       deadReckonedPos = _lastServerPos + _lastServerVel × (Time.time - _lastSnapshotTime)
+       _visualPos = Lerp or snap towards deadReckonedPos
+       transform.position = _visualPos
+       transform.rotation = Euler(0, _lastServerRotY, 0)
+
+  2. UpdateAnimation()
+       speed = _lastServerVel.magnitude
+       animator.SetFloat("Speed", speed)
+       animator.SetInteger("State", _currentState)
+```
+
+**Visual Position Access:**
 
 ```csharp
-protected override void Update()
-{
-    base.Update();
+// In NetworkClient.cs:101
+public Vector3 GetVisualPosition()
+    => _localPlayerView?.GetVisualPosition() ?? Vector3.zero;
 
-    if (_isLocalPlayer)
-    {
-        UpdateLocalPlayerView();
-    }
-    else
-    {
-        UpdateRemotePlayerView();
-    }
-}
-
-private void UpdateLocalPlayerView()
-{
-    // POSITION: Always from server (interpolated)
-    if (_networkClient.HasVisualPosition)
-    {
-        transform.position = _networkClient.GetVisualPosition();
-        // = _basePos + _corrector.VisualOffset
-    }
-
-    // ROTATION: V5.0 Pure LoL - Use local intent for immediate feedback
-    if (_networkClient.HasLocalMoveIntent())
-    {
-        Vector3 intent = _networkClient.GetLocalMoveIntent();
-        float targetRotY = Mathf.Atan2(intent.x, intent.z) * Mathf.Rad2Deg;
-
-        // Smooth rotation towards input direction
-        float smoothedRotY = Mathf.LerpAngle(
-            transform.eulerAngles.y,
-            targetRotY,
-            Time.deltaTime * 15f  // Fast response
-        );
-
-        transform.rotation = Quaternion.Euler(0, smoothedRotY, 0);
-    }
-    else
-    {
-        // No local intent - use server rotation
-        float serverRotY = _networkClient.GetVisualRotationY();
-        transform.rotation = Quaternion.Euler(0, serverRotY, 0);
-    }
-
-    // ANIMATION: V5.0 Pure LoL - Use local intent for immediate feedback
-    bool localIsMoving = _networkClient.HasLocalMoveIntent();
-    _animator.SetBool("IsMoving", localIsMoving);
-    _animator.SetFloat("Speed", localIsMoving ? 1f : 0f);
-}
+// In EntityView.cs:229
+public Vector3 GetVisualPosition() => _visualPos;
 ```
 
 **Key Points:**
 
-- **Position:** 100% from server (via interpolation)
-- **Rotation:** From local intent (instant feedback) OR server (if no intent)
-- **Animation:** From local intent (instant "run" animation)
-
-**Visual Position Calculation:**
-
-```csharp
-// In NetworkClient.cs
-public Vector3 GetVisualPosition()
-{
-    return _visualPositionManager.VisualPosition;
-    // = _basePos + _corrector.VisualOffset
-}
-```
+- **Position:** 100% from server (dead-reckoned from last snapshot)
+- **Rotation:** From server (`_lastServerRotY`) — no local-intent rotation in V5.0
+- **Animation:** From server velocity magnitude — no local-intent animation in V5.0
+- **Same code path for local and remote** — no special-casing
 
 ---
 
@@ -1034,89 +924,86 @@ public Vector3 GetVisualPosition()
 
 ### What is "Pure LoL-Style"?
 
-**Definition:** Client position comes **100% from server snapshots** (interpolated), with **local intent feedback** only for rotation and animation.
+**Definition:** Client position comes **100% from server snapshots** (dead-reckoned between arrivals), with **no local intent feedback** for rotation or animation in V5.0.
 
-**No Client-Side Prediction:** Unlike FPS games (e.g., Valorant, CS:GO), the client does NOT move its character locally and reconcile with server. This eliminates rubber-banding but adds ~50-100ms perceived latency for position.
+**No Client-Side Prediction:** Unlike FPS games (e.g., Valorant, CS:GO), the client does NOT move its character locally and reconcile with server. This eliminates rubber-banding but adds ~50ms perceived latency for position.
 
-**Instant Feedback via Local Intent:**
+**V5.0 Rendering (Dead-Reckoning):**
 
-- **Rotation:** Character turns towards input direction immediately
-- **Animation:** "Run" animation starts immediately
-- **Position:** Arrives ~50-100ms later (from server)
+- **Position:** Dead-reckoned from last server snapshot (`serverPos + serverVel × dt`)
+- **Rotation:** From server `rotationY` field in snapshot
+- **Animation:** Derived from server velocity magnitude
+- **Local intent (`SetLocalMoveIntent`) is a no-op** — kept for API compatibility only
 
 **Why This Works for MOBA:**
 
-1. **Movement is predictable** - no complex physics, just direction × speed
-2. **Rotation feedback** gives illusion of responsiveness
-3. **50-100ms latency** is acceptable for strategic gameplay (vs twitch shooter)
-4. **Zero rubber-banding** - what you see is ground truth
+1. **Movement is predictable** — no complex physics, just direction × speed
+2. **Dead-reckoning** provides smooth visuals between 60Hz snapshots
+3. **50ms latency** is acceptable for strategic gameplay (vs twitch shooter)
+4. **Zero rubber-banding** — what you see is ground truth
 
 ### Comparison: Prediction vs Pure LoL
 
-| Aspect | Client Prediction (FPS) | Pure LoL (MOBA) |
-|--------|-------------------------|-----------------|
-| **Position** | Local prediction + reconciliation | Server interpolation only |
-| **Rotation** | Server or local | Local intent (instant) |
-| **Animation** | Server or local | Local intent (instant) |
-| **Latency (perceived)** | 0ms (position) | 50-100ms (position) |
+| Aspect | Client Prediction (FPS) | Pure LoL V5.0 (MOBA) |
+|--------|-------------------------|----------------------|
+| **Position** | Local prediction + reconciliation | Server dead-reckoning |
+| **Rotation** | Server or local | Server (from snapshot) |
+| **Animation** | Server or local | Server velocity magnitude |
+| **Latency (perceived)** | 0ms (position) | ~50ms (position) |
 | **Rubber-banding** | Frequent (on misprediction) | Never |
 | **Divergence Risk** | High (walls, CC, knockback) | Zero |
-| **Complexity** | High (rollback, reconciliation) | Low (interpolation only) |
+| **Complexity** | High (rollback, reconciliation) | Low (dead-reckoning only) |
 
-### Local Intent Feedback Flow
+### Dead-Reckoning Flow
 
 ```
-Frame 0: Player presses 'W'
+Frame 0: Snapshot arrives (serverPos, serverVel, rotY)
     ↓
-    SetLocalMoveIntent(forward)  ◄── Stored immediately
-    ↓
-    Rotation: Turn towards 'forward' (LerpAngle ×15)  ◄── INSTANT
-    Animation: IsMoving=true, Speed=1.0               ◄── INSTANT
-    Position: Unchanged (waits for server)            ◄── DELAYED
-    ↓
-    Send InputPacket(MoveDir, forward) to server
+    _lastServerPos = serverPos
+    _lastServerVel = serverVel        ◄── Stored for extrapolation
+    _lastServerRotY = rotY
+    _lastSnapshotTime = Time.time
 
-Frame 1-3: Player holds 'W'
+Frame 1 (~8ms later, no new snapshot yet):
     ↓
-    Rotation/Animation active (local intent maintained)
-    Position still waiting...
+    dt = Time.time - _lastSnapshotTime = 0.008s
+    deadReckonedPos = serverPos + serverVel × 0.008
+    _visualPos = Lerp(_visualPos, deadReckonedPos, smoothing)
+    transform.position = _visualPos   ◄── SMOOTH (no discrete jumps)
+    transform.rotation = Euler(0, rotY, 0)
+    speed = serverVel.magnitude
+    animator.SetFloat("Speed", speed)
 
-Frame ~4 (after ~50-100ms): First snapshot arrives
+Frame ~4 (after 16ms): Next snapshot arrives
     ↓
-    BasePos advances (via interpolation)
-    Position STARTS moving
-    Rotation/Animation ALREADY active since Frame 0!
+    New serverPos/serverVel stored, dead-reckoning restarts
 ```
 
-**Result:** Player SEES instant response (rotation/animation), FEELS acceptable latency (position).
+**Result:** Smooth visual movement between 60Hz snapshots with zero client-side prediction complexity.
 
 ### Discontinuity Handling
 
-**Problem:** Certain events create position jumps that shouldn't be interpolated (blink, teleport, respawn).
+**Problem:** Respawn creates a position jump that must not be smoothed over.
 
-**Solution:** Event flags in snapshot trigger special handling.
+**Solution:** `EntityView.Teleport()` snaps `_visualPos` directly and resets dead-reckoning state.
 
 ```csharp
-// Server marks blink event
-entityState.EventFlags |= EntityEventFlags.BlinkEvent;
-
-// Client detects and snaps
-if (state.HasBlinkEvent)
+// EntityView.cs:172-183
+public virtual void Teleport(Vector3 position, float rotationY)
 {
-    _corrector.SnapHard(serverTime);   // Zero out visual offset
-    _basePrevValid = false;             // Don't absorb this jump
+    transform.position = position;
+    _lastServerPos = position;
+    _lastServerVel = Vector3.zero;
+    _lastServerRotY = rotationY;
+    _lastSnapshotTime = Time.time;
+    _visualPos = position;  // No lerp from old position
+    _hasSnapshot = true;
 }
 ```
 
-**Event Flags:**
+**Without teleport snap:** Client would lerp smoothly from death position to respawn position (looks wrong).
 
-- `BlinkEvent` - Short teleport (dash ability)
-- `TeleportEvent` - Long teleport (recall, summoner spell)
-- `StateReset` - Respawn, forced snap
-
-**Without snap:** Client would interpolate smoothly from old position to blink destination (looks wrong).
-
-**With snap:** Client jumps instantly to new position (matches visual expectation).
+**With teleport snap:** Client jumps instantly to new position (matches visual expectation).
 
 ---
 
@@ -1152,19 +1039,19 @@ if (state.HasBlinkEvent)
 ```
 Client-side:     0ms  ( 0%) ✅ Fully optimized
 Network (up):   ~1ms  ( 2%)
-Server receive: 17ms  (34%) ⚠️ Could improve with faster poll
+Server receive: 17ms  (34%) ✅ Already optimized (Update polling)
 Server tick:    16ms  (32%) ⚠️ Inherent at 60Hz
 Network (down): ~1ms  ( 2%)
-Client receive: 15ms  (30%) ⚠️ Interpolation buffer delay
+Client receive: 15ms  (30%) Frame interval (next Update)
 ────────────────────────────
 Total:          50ms (100%)
 ```
 
 ### Where Time Is Spent
 
-1. **Server poll delay (17ms):** Time between packet arriving at OS and server reading it. Could be reduced with higher poll rate.
+1. **Server receive (17ms):** Worst-case frame interval (polling in `Update()` at ~60fps). Already optimized — no further reduction without higher frame rate.
 2. **Server tick (16ms):** Inherent at 60Hz. To reduce, increase tick rate to 120Hz (halves to 8ms).
-3. **Client interpolation buffer (15ms):** Adaptive buffer to smooth jitter. Required for smooth visuals.
+3. **Client receive (15ms):** Frame interval until next `Update()` processes the snapshot. No interpolation buffer in V5.0.
 
 ---
 
@@ -1175,14 +1062,14 @@ Total:          50ms (100%)
 1. **120Hz Input Rate:** Intent created every 8.3ms (vs 100ms in v1.0)
 2. **120Hz Send Rate:** Packets sent every 8.3ms (vs 33ms in v1.0)
 3. **Double-Flush:** Packets sent same frame (0ms delay vs 16-33ms in v1.0)
-4. **Local Intent Feedback:** Rotation/animation respond instantly (0ms perceived)
+4. **No local intent feedback in V5.0** — rotation/animation derived from server velocity
 
-**Result:** 0ms client-side delay (was ~50-100ms in v1.0)
+**Result:** 0ms client-side delay for packet creation (was ~50-100ms in v1.0)
 
 ### Server-Side
 
-1. **Manual Incoming Poll:** Polls at FixedUpdate START (deterministic timing)
-2. **Input Buffering:** Ensures inputs applied at correct tick boundary
+1. **Manual Incoming Poll:** Polls in Update() at frame rate (~120fps), decoupled from tick rate
+2. **Input Buffering:** ConcurrentQueue ensures thread-safe enqueue; applied at FixedUpdate tick boundary
 3. **60Hz Tick Rate:** Reduced from 30Hz (16ms tick vs 33ms)
 
 **Result:** Consistent 16-17ms server processing (was 33-66ms in v1.0)
@@ -1261,38 +1148,31 @@ Debug.Log($"[{Time.time:F3}] [SNAPSHOT RECV] +{totalDelay}ms tick={tick} pos={po
 
 **Possible Causes (if it does happen):**
 
-1. **Client applying inputs locally:** Verify `SetLocalMoveIntent()` does NOT modify position
-2. **Visual offset too large:** Check `_visualOffset.magnitude` in VisualOffsetCorrector
+1. **Dead-reckoning overshoot:** `_lastServerVel` is stale — check that snapshots are arriving at 60Hz
+2. **Snap smoothing too slow:** `NetcodeConstants.VISUAL_SMOOTHING_SPEED` may be too low
 
-**Diagnosis:** Log `_basePos` and `_visualOffset` separately. Offset should stay < 1 unit.
+**Diagnosis:** Log `_lastServerPos`, `_lastServerVel`, and `_visualPos` in `EntityView.UpdatePosition()`. The gap between `deadReckonedPos` and `_visualPos` should stay under ~0.5 units.
 
 ### Symptom: Animation lags behind input
 
-**Cause:** Animation triggered from server snapshot instead of local intent.
+**Cause:** In V5.0 animation speed is derived from `_lastServerVel.magnitude` (EntityView.cs:240). There is ~16ms lag (one snapshot interval) by design.
 
-**Fix:** Verify `PlayerView.cs:203-214` uses `HasLocalMoveIntent()` not server state.
-
-```csharp
-// WRONG
-bool isMoving = _networkClient.GetServerIsMoving();  // Delayed
-
-// RIGHT
-bool isMoving = _networkClient.HasLocalMoveIntent();  // Instant
-```
-
-### Symptom: Rotation snaps instead of smoothing
-
-**Cause:** Using server rotation instead of local intent.
-
-**Fix:** Verify rotation uses `LerpAngle()` with local intent.
+**If lag is much longer (>100ms):** Snapshots may not be arriving. Check `[SNAPSHOT RECV]` logs.
 
 ```csharp
-// WRONG
-transform.rotation = Quaternion.Euler(0, serverRotY, 0);  // Snap
+// V5.0: Animation driven by server velocity — this is correct
+float speed = _lastServerVel.magnitude;
+_animator.SetFloat(SpeedHash, speed);
 
-// RIGHT
-float smoothedRotY = Mathf.LerpAngle(current, targetRotY, dt * 15f);  // Smooth
+// NOTE: HasLocalMoveIntent() / GetLocalMoveIntent() do NOT exist in V5.0.
+// SetLocalMoveIntent() / ClearLocalMoveIntent() are no-ops (NetworkClient.cs:122-127).
 ```
+
+### Symptom: Character slides after stopping
+
+**Cause:** `_lastServerVel` is non-zero when player stops but no new snapshot has arrived yet.
+
+**Fix:** This is handled by the snap-when-stopped branch in `EntityView.UpdatePosition()` (line 211). Verify `_lastServerVel.sqrMagnitude < 0.01f` check is not bypassed.
 
 ---
 
@@ -1315,33 +1195,34 @@ float smoothedRotY = Mathf.LerpAngle(current, targetRotY, dt * 15f);  // Smooth
 ```
 Client Input:
 Assets/Scripts/Client/Input/
-├── InputCollector.cs           # Keyboard sampling, local intent
-├── IntentBuilder.cs            # Rate-limiting, intent creation
+├── InputCollector.cs           # Keyboard sampling, mode switch (WASD/click)
+└── IntentBuilder.cs            # Rate-limiting (120Hz), intent creation
 
 Client Network:
 Assets/Scripts/Core/
-└── NetworkClient.cs            # Packet creation, send/receive
+└── NetworkClient.cs            # Packet creation, send/receive, snapshot dispatch
 
-Client Visual:
-Assets/Scripts/Client/Prediction/
-├── VisualPositionManager.cs    # Orchestrates interpolation + correction
-├── BaseInterpolator.cs         # Lerp between snapshots
-└── VisualOffsetCorrector.cs    # Smooth discontinuities
+Client Visual (V5.0 dead-reckoning):
+Assets/Scripts/Client/View/Entities/
+├── EntityView.cs               # Base: UpdatePosition() dead-reckoning + snap smoothing
+└── PlayerView.cs               # Derived: class visuals, ability triggers
 
 Server:
 Assets/Scripts/Server/
-└── ServerGameLoop.cs           # Input buffering, simulation tick
+└── ServerGameLoop.cs           # Update() polling, FixedUpdate() tick, BroadcastSnapshots()
 
 Simulation:
+Assets/GameSim/Core/
+└── SimWorld.cs                 # Step() — advances physics + clock
 Assets/GameSim/Commands/Handlers/
-└── MovementHandler.cs          # Position/velocity update
+└── MovementHandler.cs          # Position/velocity update per tick
 
 Network Layer:
 Assets/Scripts/Network/NetAdapter/
-├── FishNet/FishNetAdapter.cs   # Transport implementation
+├── FishNet/FishNetAdapter.cs   # Transport implementation, ForceIterate*()
 ├── Messages/InputPacket.cs     # Input message format
-├── Messages/SnapshotDelta.cs   # Snapshot message format
-└── SnapshotHelper.cs           # Snapshot creation
+├── Messages/SnapshotDelta.cs   # Snapshot message format (EntityState = 30 bytes)
+└── SnapshotHelper.cs           # Snapshot creation (CreateSnapshot, CreateFilteredSnapshot)
 ```
 
 ---

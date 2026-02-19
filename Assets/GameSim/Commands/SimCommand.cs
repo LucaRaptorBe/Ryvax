@@ -105,14 +105,9 @@ namespace MOBANet.GameSim.Commands
         public bool IsMoveStop => IsMovement && Action == MovementAction.Stop;
 
         /// <summary>
-        /// Is this a dash command?
-        /// </summary>
-        public bool IsDash => IsMovement && Action == MovementAction.Dash;
-
-        /// <summary>
         /// Is this a jump command?
         /// </summary>
-        //public bool IsJump => IsMovement && Action == MovementAction.Jump;
+        public bool IsJump => IsMovement && Action == MovementAction.Jump;
 
         #endregion
 

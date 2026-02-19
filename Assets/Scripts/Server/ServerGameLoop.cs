@@ -19,6 +19,7 @@ using MOBANet.Core;
 using MOBANet.GameSim.Core;
 using MOBANet.GameSim.Commands;
 using MOBANet.GameSim.Entities;
+using MOBANet.GameSim.Events;
 using MOBANet.NetAdapter;
 using MOBANet.NetAdapter.AOI;
 using MOBANet.NetAdapter.Buffers;
@@ -52,6 +53,13 @@ namespace MOBANet.Server
         [SerializeField] private float _aoiVisionRadius = 50f; // Increased to cover spawn distance (40 units)
         [SerializeField] private float _aoiHysteresis = 5f;
         [SerializeField] private float _aoiCellSize = 20f;
+
+        [Header("Debug")]
+        [SerializeField] private bool _spawnTestBot = false;
+        [Tooltip("Class ID for the test bot (1=Archer, 2=Mage, etc.)")]
+        [SerializeField] private int _testBotClassId = 1;
+        [Tooltip("Spawn position for the test bot (overrides team spawn)")]
+        [SerializeField] private Vector3 _testBotPosition = new(5, 0, 0);
 
         [Header("Spawning")]
         [SerializeField] private Vector3[] _team1Spawns = {
@@ -91,6 +99,14 @@ namespace MOBANet.Server
 
         // Movement state sequence tracking (per client)
         private readonly Dictionary<int, uint> _lastMovementSeq = new();
+
+        // Respawn system
+        private const float RESPAWN_DELAY = 5f;
+        private readonly List<(uint entityId, float respawnTime)> _pendingRespawns = new();
+
+        // Test bot
+        private const int BOT_CLIENT_ID = -100;
+        private bool _botSpawned;
 
         // INPUT BUFFERING V2: ConcurrentQueue for thread-safe enqueue + Dictionary for per-tick processing
         // Network thread enqueues, main thread dequeues and processes
@@ -208,19 +224,19 @@ namespace MOBANet.Server
 
         /// <summary>
         /// Process incoming network packets every frame (60-120 FPS).
-        /// Decoupled from simulation tick rate (30 Hz) to minimize input latency.
+        /// Decoupled from simulation tick rate (60 Hz) to minimize input latency.
         /// </summary>
         private void Update()
         {
             if (!_isRunning) return;
 
             // Process incoming packets at frame rate (not tick rate)
-            // This eliminates the 33ms delay from waiting for next tick
+            // This eliminates the 16ms delay from waiting for next tick
             _netAdapter.ForceIterateIncoming();
         }
 
         /// <summary>
-        /// Run authoritative simulation at fixed 30 Hz tick rate.
+        /// Run authoritative simulation at fixed 60 Hz tick rate.
         /// </summary>
         private void FixedUpdate()
         {
@@ -228,6 +244,7 @@ namespace MOBANet.Server
 
             RunSimulation();
             TickWatchdog(Time.fixedDeltaTime);
+            TickRespawns();
             BroadcastSnapshots();
         }
 
@@ -286,10 +303,8 @@ namespace MOBANet.Server
                 // Step advances physics/state, then Clock.Advance()
                 _simWorld.Step();
 
-                uint tickAfter = _simWorld.Clock.CurrentTick;
-
-                // LOG: Track tick execution
-                // Debug.Log($"[{Time.time:F3}] [SERVER TICK] simulated={currentTick} → now={tickAfter}");
+                // Drain SimEvents from physics (projectile hits → DamageDealt/EntityDeath)
+                DrainAndBroadcastSimEvents();
             }
 
             // Update AOI positions after simulation
@@ -470,6 +485,13 @@ namespace MOBANet.Server
             StartCoroutine(SendSpawnEventsDelayed(clientId, player.Id, teamId));
 
             // Debug.Log($"[ServerGameLoop] SERVER SPAWN: Player {player.Id}, ClientId={clientId}, Team={teamId}, Pos={spawnPos:F3}, ServerTick={spawnTick}, SimPlayer.Pos={player.Transform.Position:F3}");
+
+            // Spawn a test bot on the opposing team (first real client only)
+            if (_spawnTestBot && !_botSpawned)
+            {
+                _botSpawned = true;
+                StartCoroutine(SpawnTestBot(teamId));
+            }
         }
 
         private IEnumerator SendSpawnEventsDelayed(int clientId, uint playerId, byte teamId)
@@ -508,6 +530,34 @@ namespace MOBANet.Server
             }
 
             // Debug.Log($"[ServerGameLoop] Sent spawn events for player {playerId} to client {clientId}");
+        }
+
+        private IEnumerator SpawnTestBot(byte hostTeamId)
+        {
+            // Wait 2 frames for host player to be fully set up
+            yield return null;
+            yield return null;
+
+            byte botTeam = (byte)(hostTeamId == 1 ? 2 : 1);
+            Vector3 botSpawn = _testBotPosition;
+
+            var bot = _simWorld.SpawnPlayer(BOT_CLIENT_ID, botSpawn, botTeam);
+            bot.ClassId = _testBotClassId;
+
+            // Register in AOI
+            _aoiManager.UpdateEntityPosition(bot.Id, botSpawn);
+
+            // Broadcast spawn to all clients
+            var spawnEvent = ReliableEvent.EntitySpawn(
+                _simWorld.Clock.CurrentTick, bot.Id, BOT_CLIENT_ID, botTeam, botSpawn);
+            _netAdapter.SendToAll(spawnEvent, reliable: true);
+
+            // Broadcast class assignment so the client creates the visual
+            var classEvent = ReliableEvent.ClassAssign(
+                _simWorld.Clock.CurrentTick, bot.Id, (byte)_testBotClassId);
+            _netAdapter.SendToAll(classEvent, reliable: true);
+
+            Debug.Log($"[ServerGameLoop] Test bot spawned: id={bot.Id}, team={botTeam}, class={_testBotClassId}, pos={botSpawn}");
         }
 
         private void OnClientDisconnected(int clientId)
@@ -829,72 +879,140 @@ namespace MOBANet.Server
 
         /// <summary>
         /// Handle incoming game command.
-        /// DISCRETE EVENTS ONLY: Jump, spell, attack, items, ping.
-        /// Movement is handled by OnMovementStateReceived (semi-stateless).
+        /// DISCRETE EVENTS ONLY: spell, attack, items, ping, system.
+        /// Movement is handled by buffered intent handlers (OnMoveDirReceived, etc.).
         /// </summary>
         private void OnCommandReceived(int clientId, GameCommand cmd)
         {
             uint serverTick = _simWorld.Clock.CurrentTick;
 
-            // SEMI-STATELESS: Skip movement commands - handled by OnMovementStateReceived
-            if (cmd.Category == CommandCategory.Movement)
+            // SEMI-STATELESS: Skip continuous movement commands - handled by buffered intent handlers
+            // Jump is a discrete movement event and goes through CommandDispatcher
+            if (cmd.Category == CommandCategory.Movement && cmd.Action != MovementAction.Jump)
             {
-                // Still ack the command for client reconciliation
                 _commandBuffer.AckCommand(clientId, cmd.Sequence);
                 return;
             }
 
-            // Handle class selection
-            if (cmd.Category == CommandCategory.System && cmd.Action == SystemAction.ClassSelect)
-            {
-                var selectPlayer = _simWorld.GetPlayerByClient(clientId);
-                Debug.Log($"[ServerGameLoop] ClassSelect received: clientId={clientId}, classId={cmd.Data0}, seq={cmd.Sequence}, player={selectPlayer?.Id}");
-                if (selectPlayer != null)
-                {
-                    selectPlayer.ClassId = cmd.Data0;
-                    var classEvent = ReliableEvent.ClassAssign(
-                        serverTick, selectPlayer.Id, (byte)cmd.Data0);
-                    _netAdapter.SendToAll(classEvent, reliable: true);
-                    Debug.Log($"[ServerGameLoop] ClassAssign broadcast: entityId={selectPlayer.Id}, classId={cmd.Data0}");
-                }
-                else
-                {
-                    Debug.LogWarning($"[ServerGameLoop] ClassSelect FAILED: no player for clientId={clientId}");
-                }
-                _commandBuffer.AckCommand(clientId, cmd.Sequence);
-                return;
-            }
-
-            // METRIC B: Handle ping request - echo back immediately
+            // METRIC B: Handle ping request - echo back immediately (diagnostic, not gameplay)
             if (cmd.Category == CommandCategory.Ping && cmd.Action == PingAction.Request)
             {
                 var pongEvent = new ReliableEvent
                 {
                     ServerTick = serverTick,
-                    Type = NetEventType.Ping, // Reuse Ping event type for pong
+                    Type = NetEventType.Ping,
                     EntityId = 0,
-                    Data1 = cmd.Sequence, // Echo back the ping sequence
+                    Data1 = cmd.Sequence,
                     Data2 = 0
                 };
                 _netAdapter.SendToClient(clientId, pongEvent, reliable: true);
-                // Debug.Log($"[METRIC B] [PONG SEND] seq={cmd.Sequence} to client {clientId}");
                 _commandBuffer.AckCommand(clientId, cmd.Sequence);
                 return;
             }
 
-            var player = _simWorld.GetPlayerByClient(clientId);
-
-            DebugLogger.LogThrottled(DebugLogger.Category.Network,
-                $"Event from client {clientId}: Cat={cmd.Category}, Action={cmd.Action}, Seq={cmd.Sequence}, ServerTick={serverTick}",
-                frameInterval: 30);
-
-            // Convert to SimCommand and execute
+            // All other commands go through CommandDispatcher (Ability, System, Attack, Item, etc.)
             var simCmd = CommandHelper.ToSimCommand(cmd, serverTick);
             _simWorld.ExecuteCommand(clientId, simCmd);
 
-            // Track for acknowledgment
+            // Drain SimEvents raised by handlers (AbilityUsed, ClassAssign, etc.)
+            DrainAndBroadcastSimEvents();
+
             _commandBuffer.AckCommand(clientId, cmd.Sequence);
         }
+
+        #region SimEvent Drain
+
+        /// <summary>
+        /// Drain all SimEvents from the simulation queue and broadcast as ReliableEvents.
+        /// Called after ExecuteCommand() (for Ability/System commands) and after Step() (for projectile hits).
+        /// </summary>
+        private void DrainAndBroadcastSimEvents()
+        {
+            var events = _simWorld.DrainEvents();
+            if (events == null) return;
+
+            uint serverTick = _simWorld.Clock.CurrentTick;
+
+            foreach (var simEvt in events)
+            {
+                switch (simEvt.Type)
+                {
+                    case SimEventType.AbilityUsed:
+                    {
+                        var evt = ReliableEvent.AbilityUsed(
+                            serverTick, simEvt.EntityId, (byte)simEvt.Data1, simEvt.Direction);
+                        _netAdapter.SendToAll(evt, reliable: true);
+                        break;
+                    }
+
+                    case SimEventType.DamageDealt:
+                    {
+                        var evt = ReliableEvent.DamageDealt(
+                            serverTick, simEvt.EntityId, simEvt.Data1, simEvt.Data2);
+                        _netAdapter.SendToAll(evt, reliable: true);
+                        break;
+                    }
+
+                    case SimEventType.EntityDeath:
+                    {
+                        var evt = ReliableEvent.EntityDeath(
+                            serverTick, simEvt.EntityId, simEvt.Data1);
+                        _netAdapter.SendToAll(evt, reliable: true);
+
+                        // Queue respawn for the dead player
+                        var deadPlayer = _simWorld.GetEntity<SimPlayer>(simEvt.EntityId);
+                        if (deadPlayer != null)
+                        {
+                            QueueRespawn(deadPlayer);
+                        }
+                        break;
+                    }
+
+                    case SimEventType.EntityRespawn:
+                    {
+                        var evt = ReliableEvent.EntityRespawn(
+                            serverTick, simEvt.EntityId,
+                            (ushort)simEvt.Data1, (ushort)simEvt.Data2);
+                        _netAdapter.SendToAll(evt, reliable: true);
+                        break;
+                    }
+
+                    case SimEventType.ClassAssign:
+                    {
+                        var evt = ReliableEvent.ClassAssign(
+                            serverTick, simEvt.EntityId, (byte)simEvt.Data1);
+                        _netAdapter.SendToAll(evt, reliable: true);
+                        break;
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region Respawn System
+
+        private void QueueRespawn(SimPlayer player)
+        {
+            _pendingRespawns.Add((player.Id, Time.time + RESPAWN_DELAY));
+        }
+
+        private void TickRespawns()
+        {
+            for (int i = _pendingRespawns.Count - 1; i >= 0; i--)
+            {
+                var (entityId, respawnTime) = _pendingRespawns[i];
+                if (Time.time < respawnTime) continue;
+
+                _pendingRespawns.RemoveAt(i);
+
+                // Respawn via SimWorld (raises EntityRespawn SimEvent)
+                _simWorld.RespawnPlayer(entityId);
+                DrainAndBroadcastSimEvents();
+            }
+        }
+
+        #endregion
 
         #endregion
 

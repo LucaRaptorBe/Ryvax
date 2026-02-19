@@ -15,7 +15,7 @@ MonoBehaviour:
   abilityName: Deadwind
   description: Long wind-up, fires a high-velocity shot at the chosen enemy champion.
     Deals 200/350/500 physical damage.
-  icon: {fileID: 0}
+  icon: {fileID: 21300000, guid: fc03660b75bef4be2bdd944709d80671, type: 3}
   baseDamage: 200
   baseCooldown: 50
   baseRange: 0

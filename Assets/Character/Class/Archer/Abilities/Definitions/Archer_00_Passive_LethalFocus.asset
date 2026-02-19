@@ -15,10 +15,10 @@ MonoBehaviour:
   abilityName: Lethal Focus
   description: Each basic attack grants 1 Focus stack. At 5 stacks, the next basic
     attack is guaranteed to critically strike and consumes all stacks.
-  icon: {fileID: 0}
+  icon: {fileID: 21300000, guid: b6206bfda9b524a29b7d8b53499b54c1, type: 3}
   baseDamage: 0
   baseCooldown: 0
-  baseRange: 600
+  baseRange: 8
   targetType: 1
   targetFilter: 1
   spec1Name: 

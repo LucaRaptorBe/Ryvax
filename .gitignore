@@ -93,3 +93,6 @@ db.json
 
 # Claude Code
 .claude/
+
+# Archived docs
+Docs/Archive/

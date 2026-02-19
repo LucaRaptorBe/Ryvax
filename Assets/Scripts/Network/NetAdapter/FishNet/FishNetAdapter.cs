@@ -282,7 +282,7 @@ namespace MOBANet.NetAdapter.FishNet
 
                 if (conn == null)
                 {
-                    Debug.LogWarning($"[FishNetAdapter] SendToClient: Connection not found for client {clientId}");
+                    // Debug.LogWarning($"[FishNetAdapter] SendToClient: Connection not found for client {clientId}");
                     return;
                 }
             }
@@ -588,7 +588,7 @@ namespace MOBANet.NetAdapter.FishNet
         /// <summary>
         /// Force immediate flush of outgoing network data.
         /// Call this in Update to flush packets at frame rate instead of tick rate,
-        /// eliminating the 30Hz tick gating delay (33ms → ~0ms).
+        /// eliminating the 60Hz tick gating delay (16ms → ~0ms).
         /// </summary>
         public void ForceIterateOutgoing()
         {
